@@ -83,9 +83,17 @@
     isFFmpegLoading = true;
     try {
       const { createFFmpeg } = FFmpeg;
+
+      // Check if SharedArrayBuffer is available in this browser context
+      const hasSharedArrayBuffer = typeof SharedArrayBuffer !== "undefined";
       
-      // Use CDN by default for web app compatibility (GitHub Pages, Netlify, etc.)
-      const corePath = "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js";
+      // If SharedArrayBuffer is available, use multi-thread core, otherwise use single-thread core-st!
+      // core-st does NOT need SharedArrayBuffer, guaranteeing it works on any browser/device!
+      const corePath = hasSharedArrayBuffer
+        ? "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js"
+        : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
+
+      console.log(`Cargando FFmpeg.wasm (${hasSharedArrayBuffer ? 'Multihilo' : 'Monohilo / Single-Thread core-st'})...`);
 
       ffmpeg = createFFmpeg({
         log: true,
@@ -104,12 +112,12 @@
       console.log("FFmpeg.wasm cargado con éxito en el navegador!");
       return ffmpeg;
     } catch (err) {
-      console.error("Error al cargar FFmpeg.wasm local, intentando CDN...", err);
+      console.warn("Fallo con primera opción de FFmpeg, intentando monohilo core-st como respaldo seguro...", err);
       try {
         const { createFFmpeg } = FFmpeg;
         ffmpeg = createFFmpeg({
           log: true,
-          corePath: "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js"
+          corePath: "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js"
         });
         await ffmpeg.load();
         return ffmpeg;
