@@ -473,21 +473,66 @@
     if (e.target === resultModal) closeResult();
   });
 
-  // Download Handler ensuring strict .mp4 extension across all browsers
-  btnDownloadResult.addEventListener("click", (e) => {
-    e.preventDefault();
-    if (!currentOutputUrl) return;
+  // Helper to trigger file download reliably across all browsers and devices
+  function triggerDownload(blob, filename) {
+    if (!blob) {
+      alert("No hay video disponible para descargar.");
+      return;
+    }
+    const cleanFilename = sanitizeFilename(filename || currentDownloadName || "video_unido.mp4");
+    const blobUrl = URL.createObjectURL(blob);
 
     const a = document.createElement("a");
-    a.style.display = "none";
-    a.href = currentOutputUrl;
-    a.download = currentDownloadName || "video_unido.mp4";
-    a.setAttribute("download", currentDownloadName || "video_unido.mp4");
+    a.href = blobUrl;
+    a.download = cleanFilename;
+    a.setAttribute("download", cleanFilename);
+    a.rel = "noopener";
+    
+    // Position off-screen with small dimensions (never display:none, to prevent browser blocking)
+    a.style.position = "fixed";
+    a.style.top = "0";
+    a.style.left = "0";
+    a.style.width = "1px";
+    a.style.height = "1px";
+    a.style.opacity = "0.01";
     document.body.appendChild(a);
-    a.click();
+
+    try {
+      a.click();
+    } catch (e) {
+      console.warn("Fallo en clic simulado, abriendo blob en nueva pestaña como respaldo:", e);
+      window.open(blobUrl, "_blank");
+    }
+
     setTimeout(() => {
-      document.body.removeChild(a);
-    }, 150);
+      if (a.parentNode) {
+        document.body.removeChild(a);
+      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+    }, 1000);
+  }
+
+  // Download Button Handler
+  btnDownloadResult.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (currentOutputBlob) {
+      triggerDownload(currentOutputBlob, currentDownloadName);
+    } else if (currentOutputUrl) {
+      const cleanFilename = sanitizeFilename(currentDownloadName || "video_unido.mp4");
+      const a = document.createElement("a");
+      a.href = currentOutputUrl;
+      a.download = cleanFilename;
+      a.setAttribute("download", cleanFilename);
+      a.style.position = "fixed";
+      a.style.opacity = "0.01";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        if (a.parentNode) document.body.removeChild(a);
+      }, 500);
+    } else {
+      alert("El video procesado aún no está listo para descargar.");
+    }
   });
 
   // Read file as Uint8Array helper
@@ -624,8 +669,10 @@
       progressBar.style.width = "95%";
 
       const outputData = ff.FS('readFile', outputVirtualFile);
-      const safeBuffer = new Uint8Array(outputData);
-      const outBlob = new Blob([safeBuffer], { type: "video/mp4" });
+      // Ensure we have a clean, non-SharedArrayBuffer copy
+      const safeBuffer = new Uint8Array(outputData.length);
+      safeBuffer.set(outputData);
+      const outBlob = new Blob([safeBuffer.buffer], { type: "video/mp4" });
       const outUrl = URL.createObjectURL(outBlob);
 
       currentOutputBlob = outBlob;
@@ -648,9 +695,11 @@
       progressModal.classList.remove("active");
 
       resultVideoPlayer.src = outUrl;
-      btnDownloadResult.href = outUrl;
-      btnDownloadResult.download = currentDownloadName;
-      btnDownloadResult.setAttribute("download", currentDownloadName);
+      if (btnDownloadResult.tagName === "A") {
+        btnDownloadResult.href = outUrl;
+        btnDownloadResult.download = currentDownloadName;
+        btnDownloadResult.setAttribute("download", currentDownloadName);
+      }
 
       resDuration.textContent = formatDuration(totalDuration);
       resResolution.textContent = items[0].resolution || "HD";
