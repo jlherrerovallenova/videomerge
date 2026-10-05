@@ -269,9 +269,16 @@ async def get_job_status(job_id: str):
 
 @app.get("/api/download/{filename}")
 async def download_output(filename: str):
+    if not filename.lower().endswith(".mp4"):
+        filename += ".mp4"
     file_path = os.path.join(OUTPUT_DIR, filename)
     if os.path.exists(file_path):
-        return FileResponse(file_path, filename=filename, media_type="video/mp4")
+        return FileResponse(
+            file_path,
+            filename=filename,
+            media_type="video/mp4",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
     raise HTTPException(status_code=404, detail="Archivo no encontrado")
 
 @app.get("/api/preview-result/{filename}")

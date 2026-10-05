@@ -399,6 +399,20 @@
     btnStartMerge.disabled = count < 2;
   }
 
+  let currentOutputBlob = null;
+  let currentOutputUrl = null;
+  let currentDownloadName = "video_unido.mp4";
+
+  // Sanitize filename to always guarantee .mp4 extension and valid Windows/OS characters
+  function sanitizeFilename(name) {
+    if (!name || !name.trim()) return "video_unido.mp4";
+    let clean = name.trim().replace(/[\\/:*?"<>|]/g, "_");
+    clean = clean.replace(/\.(mp4|mov|mkv|avi|webm|m4v|ts|flv|wmv)$/i, "");
+    clean = clean.replace(/\.+$/, "");
+    if (!clean) clean = "video_unido";
+    return clean + ".mp4";
+  }
+
   // Bulk actions
   btnSortName.addEventListener("click", () => {
     items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
@@ -457,6 +471,23 @@
   btnCloseResult.addEventListener("click", closeResult);
   resultModal.addEventListener("click", (e) => {
     if (e.target === resultModal) closeResult();
+  });
+
+  // Download Handler ensuring strict .mp4 extension across all browsers
+  btnDownloadResult.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (!currentOutputUrl) return;
+
+    const a = document.createElement("a");
+    a.style.display = "none";
+    a.href = currentOutputUrl;
+    a.download = currentDownloadName || "video_unido.mp4";
+    a.setAttribute("download", currentDownloadName || "video_unido.mp4");
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+    }, 150);
   });
 
   // Read file as Uint8Array helper
@@ -593,8 +624,13 @@
       progressBar.style.width = "95%";
 
       const outputData = ff.FS('readFile', outputVirtualFile);
-      const outBlob = new Blob([outputData.buffer], { type: "video/mp4" });
+      const safeBuffer = new Uint8Array(outputData);
+      const outBlob = new Blob([safeBuffer], { type: "video/mp4" });
       const outUrl = URL.createObjectURL(outBlob);
+
+      currentOutputBlob = outBlob;
+      currentOutputUrl = outUrl;
+      currentDownloadName = sanitizeFilename(outputFilename.value);
 
       // Clean virtual FS
       for (const name of inputNames) {
@@ -612,9 +648,9 @@
       progressModal.classList.remove("active");
 
       resultVideoPlayer.src = outUrl;
-      const downloadName = (outputFilename.value.trim() || "video_unido.mp4").replace(/\.mp4$/i, '') + ".mp4";
       btnDownloadResult.href = outUrl;
-      btnDownloadResult.download = downloadName;
+      btnDownloadResult.download = currentDownloadName;
+      btnDownloadResult.setAttribute("download", currentDownloadName);
 
       resDuration.textContent = formatDuration(totalDuration);
       resResolution.textContent = items[0].resolution || "HD";
