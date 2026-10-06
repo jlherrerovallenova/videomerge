@@ -190,8 +190,8 @@ def run_merge_job(job_id: str, req: MergeRequest):
         if req.mode == "direct":
             use_direct = True
         elif req.mode == "auto":
-            # If user didn't ask to compress, and clips are compatible, use direct copy!
-            if not req.compress and merger.can_direct_copy(ordered_infos):
+            # If user didn't ask to compress, and clips are strictly compatible, use direct copy!
+            if not req.compress and req.target_res == "auto" and merger.can_direct_copy(ordered_infos):
                 use_direct = True
 
         success = False
@@ -202,15 +202,25 @@ def run_merge_job(job_id: str, req: MergeRequest):
                 output_path,
                 progress_callback=update_progress
             )
-            # If direct copy fails unexpectedly, fallback to re-encode automatically
+            
+            # Validate output if direct copy succeeded
+            if success and os.path.exists(output_path):
+                check_info = merger.get_video_info(output_path)
+                total_exp_dur = sum(v.get("duration", 0) for v in ordered_infos)
+                # If output duration is significantly truncated, direct copy failed silently
+                if total_exp_dur > 2.0 and check_info.get("duration", 0) < total_exp_dur * 0.75:
+                    print("Direct copy output was truncated. Falling back to re-encoding...")
+                    success = False
+
+            # If direct copy failed or produced invalid file, fallback to re-encode automatically
             if not success:
-                update_progress(20.0, "Ajustando códecs automáticamente para garantizar compatibilidad...")
+                update_progress(20.0, "Ajustando y sincronizando pistas para garantizar 100% compatibilidad...")
                 success = merger.merge_videos_reencode(
                     ordered_infos,
                     output_path,
-                    quality_preset="lossless",
-                    codec="h264",
-                    target_res="auto",
+                    quality_preset="lossless" if not req.compress else req.preset,
+                    codec=req.codec,
+                    target_res=req.target_res,
                     progress_callback=update_progress
                 )
         else:
@@ -225,7 +235,7 @@ def run_merge_job(job_id: str, req: MergeRequest):
                 progress_callback=update_progress
             )
 
-        if success and os.path.exists(output_path):
+        if success and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
             result_info = merger.get_video_info(output_path)
             job["status"] = "completed"
             job["progress"] = 100.0
@@ -233,11 +243,16 @@ def run_merge_job(job_id: str, req: MergeRequest):
             job["result_info"] = result_info
         else:
             job["status"] = "failed"
-            job["error"] = "Error al procesar la unión de videos."
+            job["error"] = "Error al procesar la unión de videos. Por favor revisa los formatos de entrada."
 
     except Exception as e:
         job["status"] = "failed"
         job["error"] = str(e)
+
+@app.get("/api/backend-info")
+async def backend_info():
+    """Diagnostic endpoint to confirm Python FastAPI backend is online."""
+    return {"status": "ok", "engine": "python-native", "ffmpeg": True}
 
 @app.post("/api/merge")
 async def start_merge(req: MergeRequest, background_tasks: BackgroundTasks):

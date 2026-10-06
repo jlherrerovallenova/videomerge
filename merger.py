@@ -3,7 +3,6 @@ import re
 import math
 import subprocess
 import tempfile
-import threading
 from typing import Dict, Any, List, Optional, Callable
 import imageio_ffmpeg
 
@@ -52,6 +51,7 @@ def get_video_info(file_path: str) -> Dict[str, Any]:
         "fps": 30.0,
         "video_codec": "desconocido",
         "audio_codec": "ninguno",
+        "audio_sample_rate": 44100,
         "has_audio": False,
         "has_video": False,
     }
@@ -81,16 +81,18 @@ def get_video_info(file_path: str) -> Dict[str, Any]:
         info["height"] = h
         info["resolution"] = f"{w}x{h}"
 
-    # Parse fps: "30 fps" or "29.97 fps"
+    # Parse fps: "30 fps" or "29.97 fps" or "30.00 tbr"
     fps_match = re.search(r"(\d+(?:\.\d+)?)\s*fps", output)
     if fps_match:
         info["fps"] = float(fps_match.group(1))
 
     # Parse audio stream: Stream #0:1: Audio: aac ...
-    a_match = re.search(r"Stream #\d+:\d+(?:\[0x\w+\])?(?:\([a-z]+\))?:\s*Audio:\s*([a-zA-Z0-9_\-]+)", output)
+    a_match = re.search(r"Stream #\d+:\d+(?:\[0x\w+\])?(?:\([a-z]+\))?:\s*Audio:\s*([a-zA-Z0-9_\-]+)(?:,\s*(\d+)\s*Hz)?", output)
     if a_match:
         info["has_audio"] = True
         info["audio_codec"] = a_match.group(1).lower()
+        if a_match.group(2):
+            info["audio_sample_rate"] = int(a_match.group(2))
 
     return info
 
@@ -112,7 +114,7 @@ def generate_thumbnail(video_path: str, thumb_path: str, timestamp: float = 1.0)
             "-ss", str(timestamp),
             "-i", video_path,
             "-vframes", "1",
-            "-vf", "scale=360:-1",
+            "-vf", "scale=360:-2",
             "-q:v", "3",
             thumb_path
         ]
@@ -123,7 +125,10 @@ def generate_thumbnail(video_path: str, thumb_path: str, timestamp: float = 1.0)
         return False
 
 def can_direct_copy(video_infos: List[Dict[str, Any]]) -> bool:
-    """Check if all video clips can be joined losslessly via stream copy (-c copy)."""
+    """
+    Strictly verify if all video clips have identical stream properties
+    and can safely be merged losslessly via stream copy (-c copy).
+    """
     if len(video_infos) <= 1:
         return True
     
@@ -131,8 +136,10 @@ def can_direct_copy(video_infos: List[Dict[str, Any]]) -> bool:
     first_vcodec = first.get("video_codec")
     first_w = first.get("width")
     first_h = first.get("height")
+    first_fps = first.get("fps", 30.0)
     first_acodec = first.get("audio_codec")
     first_has_audio = first.get("has_audio")
+    first_ar = first.get("audio_sample_rate", 44100)
 
     # If first has no video codec, can't copy
     if not first_vcodec or first_vcodec == "desconocido":
@@ -143,10 +150,15 @@ def can_direct_copy(video_infos: List[Dict[str, Any]]) -> bool:
             return False
         if item.get("width") != first_w or item.get("height") != first_h:
             return False
+        if abs(item.get("fps", 30.0) - first_fps) > 0.5:
+            return False
         if item.get("has_audio") != first_has_audio:
             return False
-        if first_has_audio and item.get("audio_codec") != first_acodec:
-            return False
+        if first_has_audio:
+            if item.get("audio_codec") != first_acodec:
+                return False
+            if item.get("audio_sample_rate") != first_ar:
+                return False
 
     return True
 
@@ -165,7 +177,6 @@ def merge_videos_stream_copy(
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
         list_file = f.name
         for p in video_paths:
-            # Escape path for concat demuxer (must be absolute)
             abs_p = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
             f.write(f"file '{abs_p}'\n")
 
@@ -180,15 +191,18 @@ def merge_videos_stream_copy(
             "-i", list_file,
             "-c", "copy",
             "-avoid_negative_ts", "make_zero",
+            "-fflags", "+genpts",
             output_path
         ]
 
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
         
-        if progress_callback:
-            progress_callback(100.0, "¡Unión completada!")
-
-        return proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        # Verify output exists and is not empty
+        if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            if progress_callback:
+                progress_callback(100.0, "¡Unión completada!")
+            return True
+        return False
     finally:
         if os.path.exists(list_file):
             try:
@@ -205,8 +219,8 @@ def merge_videos_reencode(
     progress_callback: Optional[Callable[[float, str], None]] = None
 ) -> bool:
     """
-    Merge videos with smart re-encoding, resolution scaling & padding,
-    handling missing audio gracefully, and compressing according to user preference.
+    Merge videos with rock-solid re-encoding, resolution scaling & padding,
+    guaranteed audio track synchronization & normalization, and CRF compression.
     """
     ffmpeg = get_ffmpeg()
     out_dir = os.path.dirname(os.path.abspath(output_path))
@@ -226,11 +240,13 @@ def merge_videos_reencode(
         # Auto: find the maximum resolution among all clips, or default 1920x1080
         max_w = max((v.get("width", 0) for v in video_infos), default=1920)
         max_h = max((v.get("height", 0) for v in video_infos), default=1080)
-        # Ensure dimensions are even numbers (ffmpeg requirement)
-        target_w = max_w if max_w % 2 == 0 else max_w + 1
-        target_h = max_h if max_h % 2 == 0 else max_h + 1
-        if target_w == 0 or target_h == 0:
-            target_w, target_h = 1920, 1080
+        # Ensure dimensions are strictly even numbers
+        target_w = max_w if max_w > 0 else 1920
+        target_h = max_h if max_h > 0 else 1080
+        if target_w % 2 != 0:
+            target_w += 1
+        if target_h % 2 != 0:
+            target_h += 1
 
     # Calculate total duration for progress
     total_duration = sum(v.get("duration", 0) for v in video_infos)
@@ -238,22 +254,16 @@ def merge_videos_reencode(
         total_duration = 1.0
 
     # Compression preset settings
-    # CRF: lower = better quality / larger file; higher = smaller file.
-    # h264: 18 (visually lossless), 22 (balanced/high), 28 (compact/light)
-    # hevc: 20 (visually lossless), 25 (balanced), 30 (compact)
     if codec == "hevc":
         vcodec_param = "libx265"
         crf_map = {"lossless": 18, "high": 21, "balanced": 25, "compact": 30}
-        preset_speed = "medium"
+        preset_speed = "fast"
     else:
         vcodec_param = "libx264"
         crf_map = {"lossless": 17, "high": 20, "balanced": 23, "compact": 28}
-        preset_speed = "medium"
+        preset_speed = "fast"
 
     crf = crf_map.get(quality_preset, 23)
-
-    # Check if any clip has audio
-    any_audio = any(v.get("has_audio", False) for v in video_infos)
 
     # Build FFmpeg command inputs
     cmd = [ffmpeg, "-y"]
@@ -262,64 +272,53 @@ def merge_videos_reencode(
     for v in video_infos:
         cmd.extend(["-i", v["file_path"]])
 
-    # Build filter_complex string
-    # For each input:
-    # 1. Scale with aspect ratio maintained, pad with black bars to target_w:target_h, setsar=1
-    # 2. Audio: if clip has audio, resample to 44100Hz stereo. If not, generate silent audio stream!
+    # Build filter_complex string:
+    # 1. Video: scale with force_divisible_by=2, pad with black bars to target_w:target_h, setsar=1, fps=30, setpts=PTS-STARTPTS
+    # 2. Audio: resample to 44100Hz stereo with asetpts=PTS-STARTPTS and aresample=async=1000.
+    #    If clip has no audio, generate synthetic silence for that clip's duration!
     filter_parts = []
+    concat_inputs = ""
     
     for i, v in enumerate(video_infos):
-        # Video filter: scale and pad
+        # Video filter
         v_label = f"[v{i}]"
         v_filter = (
-            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30{v_label}"
+            f"[{i}:v]scale=w={target_w}:h={target_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad=w={target_w}:h={target_h}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
+            f"setsar=1,fps=30,setpts=PTS-STARTPTS{v_label}"
         )
         filter_parts.append(v_filter)
 
-        # Audio filter:
-        if any_audio:
-            a_label = f"[a{i}]"
-            if v.get("has_audio", False):
-                a_filter = f"[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo{a_label}"
-            else:
-                # Generate silence for this clip's duration
-                dur = max(0.1, v.get("duration", 1.0))
-                a_filter = f"anullsrc=channel_layout=stereo:sample_rate=44100:d={dur}{a_label}"
-            filter_parts.append(a_filter)
+        # Audio filter
+        a_label = f"[a{i}]"
+        if v.get("has_audio", False):
+            a_filter = f"[{i}:a]aresample=async=1000,aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS{a_label}"
+        else:
+            dur = max(0.5, float(v.get("duration", 1.0)))
+            a_filter = f"anullsrc=channel_layout=stereo:sample_rate=44100:d={dur},asetpts=PTS-STARTPTS{a_label}"
+        filter_parts.append(a_filter)
+
+        concat_inputs += f"[v{i}][a{i}]"
 
     # Concat filter
-    concat_inputs = ""
-    for i in range(num_videos):
-        concat_inputs += f"[v{i}]"
-        if any_audio:
-            concat_inputs += f"[a{i}]"
-
-    a_flag = 1 if any_audio else 0
-    concat_filter = f"{concat_inputs}concat=n={num_videos}:v=1:a={a_flag}[outv]"
-    if any_audio:
-        concat_filter += "[outa]"
+    concat_filter = f"{concat_inputs}concat=n={num_videos}:v=1:a=1[outv][outa]"
     filter_parts.append(concat_filter)
 
     filter_complex_str = ";".join(filter_parts)
 
     cmd.extend([
         "-filter_complex", filter_complex_str,
-        "-map", "[outv]"
-    ])
-
-    if any_audio:
-        cmd.extend([
-            "-map", "[outa]",
-            "-c:a", "aac",
-            "-b:a", "192k"
-        ])
-
-    cmd.extend([
+        "-map", "[outv]",
+        "-map", "[outa]",
         "-c:v", vcodec_param,
         "-preset", preset_speed,
         "-crf", str(crf),
         "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-ar", "44100",
+        "-ac", "2",
+        "-max_muxing_queue_size", "4096",
         "-movflags", "+faststart",
         "-progress", "pipe:1",
         output_path
@@ -331,38 +330,40 @@ def merge_videos_reencode(
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        errors="replace"
+        errors="replace",
+        bufsize=1
     )
 
-    # Read progress from stdout
     total_us = total_duration * 1_000_000
+    log_lines = []
 
-    def monitor_progress():
-        if not process.stdout:
-            return
+    # Stream real-time progress and logs safely from unified stdout pipe
+    if process.stdout:
         for line in process.stdout:
-            line = line.strip()
-            if line.startswith("out_time_ms="):
+            line_str = line.strip()
+            if len(log_lines) > 50:
+                log_lines.pop(0)
+            log_lines.append(line_str)
+
+            if line_str.startswith("out_time_ms="):
                 try:
-                    out_us = int(line.split("=")[1])
+                    out_us = int(line_str.split("=")[1])
                     pct = min(98.0, max(5.0, (out_us / total_us) * 95.0))
                     if progress_callback:
                         progress_callback(round(pct, 1), f"Comprimiendo y uniendo videos... ({int(pct)}%)")
                 except (ValueError, IndexError):
                     pass
 
-    t = threading.Thread(target=monitor_progress, daemon=True)
-    t.start()
+    process.wait()
 
-    _, stderr_text = process.communicate()
-    t.join(timeout=2.0)
-
-    if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+    if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
         if progress_callback:
             progress_callback(100.0, "¡Video unido y comprimido con éxito!")
         return True
     else:
-        print("FFmpeg Error:", stderr_text[-1000:] if stderr_text else "Unknown error")
+        err_msg = "\n".join(log_lines[-20:]) if log_lines else "Unknown FFmpeg error"
+        print("FFmpeg Error:\n", err_msg)
         return False
+
