@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import time
 import subprocess
 import tempfile
 from typing import Dict, Any, List, Optional, Callable
@@ -257,13 +258,13 @@ def merge_videos_reencode(
     if codec == "hevc":
         vcodec_param = "libx265"
         crf_map = {"lossless": 18, "high": 21, "balanced": 25, "compact": 30}
-        preset_speed = "fast"
+        preset_speed = "veryfast"
         chunk_ext = ".mp4"
     else:
         vcodec_param = "libx264"
         crf_map = {"lossless": 17, "high": 20, "balanced": 23, "compact": 28}
-        preset_speed = "fast"
-        chunk_ext = ".ts"
+        preset_speed = "veryfast"
+        chunk_ext = ".mp4"
 
     crf = crf_map.get(quality_preset, 23)
 
@@ -274,7 +275,7 @@ def merge_videos_reencode(
         if progress_callback:
             progress_callback(5.0, f"Iniciando optimización por bloques de {num_videos} videos...")
 
-        # Step 1: Normalize each clip individually (O(1) memory footprint - Addy Osmani principle)
+        # Step 1: Normalize each clip individually with real-time continuous progress
         vf = (
             f"scale=w={target_w}:h={target_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
             f"pad=w={target_w}:h={target_h}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
@@ -285,14 +286,19 @@ def merge_videos_reencode(
             chunk_file = os.path.join(temp_dir, f"chunk_{i:04d}{chunk_ext}")
             chunk_paths.append(chunk_file)
 
-            pct = 5.0 + (i / num_videos) * 85.0
-            if progress_callback:
-                progress_callback(round(pct, 1), f"Procesando video {i + 1} de {num_videos} ({int(pct)}%)...")
+            dur = max(0.5, float(v.get("duration", 1.0)))
+            total_us = dur * 1_000_000
+
+            base_pct = 5.0 + (i / num_videos) * 85.0
+            clip_weight = 85.0 / num_videos
 
             cmd = [ffmpeg, "-y", "-i", v["file_path"]]
 
             if v.get("has_audio", False):
                 cmd.extend([
+                    "-map", "0:v:0",
+                    "-map", "0:a:0",
+                    "-sn", "-dn",
                     "-vf", vf,
                     "-c:v", vcodec_param,
                     "-preset", preset_speed,
@@ -304,14 +310,15 @@ def merge_videos_reencode(
                     "-ac", "2",
                     "-avoid_negative_ts", "make_zero",
                     "-fflags", "+genpts",
+                    "-progress", "pipe:1",
+                    chunk_file
                 ])
-                if chunk_ext == ".ts":
-                    cmd.extend(["-f", "mpegts"])
-                cmd.append(chunk_file)
             else:
-                dur = max(0.5, float(v.get("duration", 1.0)))
                 cmd.extend([
                     "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:d={dur}",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-sn", "-dn",
                     "-vf", vf,
                     "-c:v", vcodec_param,
                     "-preset", preset_speed,
@@ -324,15 +331,47 @@ def merge_videos_reencode(
                     "-shortest",
                     "-avoid_negative_ts", "make_zero",
                     "-fflags", "+genpts",
+                    "-progress", "pipe:1",
+                    chunk_file
                 ])
-                if chunk_ext == ".ts":
-                    cmd.extend(["-f", "mpegts"])
-                cmd.append(chunk_file)
 
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0 or not os.path.exists(chunk_file) or os.path.getsize(chunk_file) < 512:
-                print(f"Error normalizando chunk {i}: {res.stderr}")
-                return False
+            with tempfile.TemporaryFile() as err_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=err_file,
+                    text=True,
+                    errors="replace",
+                    bufsize=1
+                )
+
+                # Read real-time progress continuous stream
+                last_tick = time.time()
+                if proc.stdout:
+                    for line in proc.stdout:
+                        line_str = line.strip()
+                        if line_str.startswith("out_time_us="):
+                            try:
+                                curr_us = int(line_str.split("=")[1])
+                                ratio = min(1.0, max(0.0, curr_us / total_us))
+                                curr_pct = base_pct + ratio * clip_weight
+                                # Throttle updates to ~4 times per second
+                                now = time.time()
+                                if now - last_tick > 0.25 and progress_callback:
+                                    last_tick = now
+                                    progress_callback(
+                                        round(curr_pct, 1),
+                                        f"Procesando video {i + 1} de {num_videos} ({int(curr_pct)}%)..."
+                                    )
+                            except Exception:
+                                pass
+
+                proc.wait()
+                if proc.returncode != 0 or not os.path.exists(chunk_file) or os.path.getsize(chunk_file) < 512:
+                    err_file.seek(0)
+                    err_out = err_file.read().decode("utf-8", errors="replace")
+                    print(f"Error normalizando chunk {i}: {err_out}")
+                    return False
 
         # Step 2: Assemble all normalized chunks instantly with stream copy
         if progress_callback:

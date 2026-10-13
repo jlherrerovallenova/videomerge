@@ -2,6 +2,7 @@
 // Optimized for zero-error video merging, audio-video synchronization, and maximum performance.
 
 (function () {
+  const API_BASE = (window.location.protocol === "file:" ? "http://127.0.0.1:8000" : "");
   let items = []; // Array of video items { id, serverId, file, name, size, sizeFormatted, duration, durationFormatted, width, height, resolution, thumbUrl, streamUrl }
   let sortableInstance = null;
   let isServerMode = false;
@@ -13,6 +14,7 @@
 
   // DOM Elements
   const engineBadge = document.getElementById("engineBadge");
+  const backendBanner = document.getElementById("backendBanner");
   const dropzone = document.getElementById("dropzone");
   const fileInput = document.getElementById("fileInput");
   const videoList = document.getElementById("videoList");
@@ -94,7 +96,7 @@
   // Detect Backend Engine
   async function checkBackend() {
     try {
-      const res = await fetch("/api/backend-info", { method: "GET", cache: "no-store" });
+      const res = await fetch(API_BASE + "/api/backend-info", { method: "GET", cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         if (data.status === "ok") {
@@ -106,19 +108,25 @@
           if (btnOpenFolder) {
             btnOpenFolder.style.display = "inline-flex";
           }
+          if (backendBanner) {
+            backendBanner.style.display = "none";
+          }
           console.log("Servidor FastAPI y motor FFmpeg nativo detectados y activos.");
           return true;
         }
       }
     } catch (e) {
-      // Backend not available (static or offline file)
+      // Backend not available (offline file or server not started)
     }
     isServerMode = false;
     if (engineBadge) {
-      engineBadge.className = "badge badge-emerald";
-      engineBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg> Motor WebAssembly (En Navegador)`;
+      engineBadge.className = "badge badge-amber";
+      engineBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg> Motor Nativo Desconectado`;
     }
-    console.log("Ejecutando en modo WebAssembly cliente.");
+    if (backendBanner) {
+      backendBanner.style.display = "flex";
+    }
+    console.log("Motor nativo desconectado. Para unir 7+ videos ejecuta iniciar_app.bat");
     return false;
   }
 
@@ -277,6 +285,10 @@
       return;
     }
 
+    if (!isServerMode) {
+      await checkBackend();
+    }
+
     if (isServerMode) {
       // Upload to Python backend
       const formData = new FormData();
@@ -285,17 +297,19 @@
       }
 
       try {
-        const res = await fetch("/api/upload", {
+        const res = await fetch(API_BASE + "/api/upload", {
           method: "POST",
           body: formData
         });
         const data = await res.json();
         if (data.success && data.items) {
-          for (const srvItem of data.items) {
+          for (let idx = 0; idx < data.items.length; idx++) {
+            const srvItem = data.items[idx];
+            const originalFile = validFiles[idx] || null;
             const item = {
               id: "v_" + Math.random().toString(36).substring(2, 9),
               serverId: srvItem.id,
-              file: null,
+              file: originalFile,
               name: srvItem.original_name,
               size: srvItem.info.file_size || 0,
               sizeFormatted: srvItem.info.file_size_formatted || "0 B",
@@ -304,8 +318,8 @@
               width: srvItem.info.width || 0,
               height: srvItem.info.height || 0,
               resolution: srvItem.info.resolution || "HD",
-              thumbUrl: srvItem.thumb_url,
-              streamUrl: srvItem.stream_url,
+              thumbUrl: API_BASE + srvItem.thumb_url,
+              streamUrl: API_BASE + srvItem.stream_url,
               hasAudio: srvItem.info.has_audio
             };
             items.push(item);
@@ -443,7 +457,7 @@
     card.querySelector(".btn-delete-card").addEventListener("click", async (e) => {
       e.stopPropagation();
       if (isServerMode && item.serverId) {
-        fetch(`/api/items/${item.serverId}`, { method: "DELETE" }).catch(() => {});
+        fetch(`${API_BASE}/api/items/${item.serverId}`, { method: "DELETE" }).catch(() => {});
       }
       // Revoke Object URLs to prevent browser memory leaks (Addy Osmani)
       if (item.streamUrl && item.streamUrl.startsWith("blob:")) {
@@ -517,7 +531,7 @@
     if (items.length === 0) return;
     if (confirm("¿Deseas vaciar la lista de videos?")) {
       if (isServerMode) {
-        fetch("/api/clear", { method: "POST" }).catch(() => {});
+        fetch(API_BASE + "/api/clear", { method: "POST" }).catch(() => {});
       }
       items.forEach(item => {
         if (item.streamUrl && item.streamUrl.startsWith("blob:")) {
@@ -577,7 +591,7 @@
   if (btnOpenFolder) {
     btnOpenFolder.addEventListener("click", async () => {
       try {
-        const res = await fetch("/api/open-folder", { method: "POST" });
+        const res = await fetch(API_BASE + "/api/open-folder", { method: "POST" });
         const data = await res.json();
         if (!data.success) {
           alert("No se pudo abrir la carpeta automáticamente: " + (data.error || ""));
@@ -689,17 +703,16 @@
         }
       });
 
-      await ffmpegWasm.load();
+      const loadPromise = ffmpegWasm.load();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Tiempo de espera agotado al descargar WebAssembly.")), 12000)
+      );
+
+      await Promise.race([loadPromise, timeoutPromise]);
       return ffmpegWasm;
     } catch (err) {
-      console.warn("Fallback de ffmpeg-core vía CDN:", err);
-      const { createFFmpeg } = FFmpeg;
-      ffmpegWasm = createFFmpeg({
-        log: false,
-        corePath: "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js"
-      });
-      await ffmpegWasm.load();
-      return ffmpegWasm;
+      console.warn("Fallo cargando WebAssembly:", err);
+      throw new Error("No se pudo inicializar el motor en el navegador. Por favor ejecuta 'iniciar_app.bat' en la carpeta para usar el motor nativo de alta velocidad.");
     } finally {
       isFFmpegLoading = false;
     }
@@ -728,9 +741,31 @@
     const customName = sanitizeFilename(outputFilename.value);
     currentDownloadName = customName;
 
+    // Refresh backend connectivity
+    if (!isServerMode) {
+      await checkBackend();
+    }
+
     // PATH 1: NATIVE PYTHON BACKEND (High-Speed & Error-Free)
-    if (isServerMode && items.every(i => i.serverId)) {
+    if (isServerMode) {
       try {
+        // Upload any items that were added while offline
+        const unuploaded = items.filter(i => !i.serverId && i.file);
+        if (unuploaded.length > 0) {
+          if (progressMessage) progressMessage.textContent = `Transfiriendo ${unuploaded.length} archivos al motor nativo...`;
+          const formData = new FormData();
+          for (const it of unuploaded) {
+            formData.append("files", it.file);
+          }
+          const upRes = await fetch(API_BASE + "/api/upload", { method: "POST", body: formData });
+          const upData = await upRes.json();
+          if (upData.success && upData.items) {
+            for (let idx = 0; idx < upData.items.length; idx++) {
+              unuploaded[idx].serverId = upData.items[idx].id;
+            }
+          }
+        }
+
         const payload = {
           video_ids: items.map(i => i.serverId),
           mode: mergeMode.value,
@@ -741,7 +776,7 @@
           output_name: customName
         };
 
-        const res = await fetch("/api/merge", {
+        const res = await fetch(API_BASE + "/api/merge", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
@@ -757,8 +792,8 @@
         // Poll job status
         let job = null;
         while (true) {
-          await new Promise(r => setTimeout(r, 400));
-          const jobRes = await fetch(`/api/job/${job_id}`);
+          await new Promise(r => setTimeout(r, 350));
+          const jobRes = await fetch(`${API_BASE}/api/job/${job_id}`);
           if (!jobRes.ok) throw new Error("Error consultando estado del proceso.");
           job = await jobRes.json();
 
@@ -781,10 +816,10 @@
         if (progressPct) progressPct.textContent = "100%";
         progressModal.classList.remove("active");
 
-        currentOutputUrl = job.output_url;
+        currentOutputUrl = API_BASE + job.output_url;
         currentOutputBlob = null;
 
-        resultVideoPlayer.src = job.stream_url;
+        resultVideoPlayer.src = API_BASE + job.stream_url;
         resDuration.textContent = job.result_info ? job.result_info.duration_formatted : formatDuration(items.reduce((a, b) => a + (b.duration || 0), 0));
         resResolution.textContent = job.result_info ? job.result_info.resolution : "Full HD";
         resSize.textContent = job.result_info ? job.result_info.file_size_formatted : "Optimizado";
@@ -800,6 +835,15 @@
         isMerging = false;
         btnStartMerge.disabled = items.length < 2;
       }
+      return;
+    }
+
+    // Guard: If offline and user has 4 or more videos, warn them directly
+    if (items.length >= 4) {
+      progressModal.classList.remove("active");
+      isMerging = false;
+      btnStartMerge.disabled = false;
+      alert("⚠️ Motor Nativo Requerido:\n\nPara unir " + items.length + " videos sin congelamientos ni límites de memoria, por favor ejecuta 'iniciar_app.bat' en la carpeta de la aplicación.\n\nEl navegador no tiene suficiente memoria para procesar tantos videos simultáneos.");
       return;
     }
 
