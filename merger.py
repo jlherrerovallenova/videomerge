@@ -258,112 +258,118 @@ def merge_videos_reencode(
         vcodec_param = "libx265"
         crf_map = {"lossless": 18, "high": 21, "balanced": 25, "compact": 30}
         preset_speed = "fast"
+        chunk_ext = ".mp4"
     else:
         vcodec_param = "libx264"
         crf_map = {"lossless": 17, "high": 20, "balanced": 23, "compact": 28}
         preset_speed = "fast"
+        chunk_ext = ".ts"
 
     crf = crf_map.get(quality_preset, 23)
 
-    # Build FFmpeg command inputs
-    cmd = [ffmpeg, "-y"]
-    
-    # We will pass each video as an input
-    for v in video_infos:
-        cmd.extend(["-i", v["file_path"]])
+    temp_dir = tempfile.mkdtemp(prefix="vmerge_chunks_")
+    chunk_paths = []
 
-    # Build filter_complex string:
-    # 1. Video: scale with force_divisible_by=2, pad with black bars to target_w:target_h, setsar=1, fps=30, setpts=PTS-STARTPTS
-    # 2. Audio: resample to 44100Hz stereo with asetpts=PTS-STARTPTS and aresample=async=1000.
-    #    If clip has no audio, generate synthetic silence for that clip's duration!
-    filter_parts = []
-    concat_inputs = ""
-    
-    for i, v in enumerate(video_infos):
-        # Video filter
-        v_label = f"[v{i}]"
-        v_filter = (
-            f"[{i}:v]scale=w={target_w}:h={target_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"pad=w={target_w}:h={target_h}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
-            f"setsar=1,fps=30,setpts=PTS-STARTPTS{v_label}"
-        )
-        filter_parts.append(v_filter)
-
-        # Audio filter
-        a_label = f"[a{i}]"
-        if v.get("has_audio", False):
-            a_filter = f"[{i}:a]aresample=async=1000,aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS{a_label}"
-        else:
-            dur = max(0.5, float(v.get("duration", 1.0)))
-            a_filter = f"anullsrc=channel_layout=stereo:sample_rate=44100:d={dur},asetpts=PTS-STARTPTS{a_label}"
-        filter_parts.append(a_filter)
-
-        concat_inputs += f"[v{i}][a{i}]"
-
-    # Concat filter
-    concat_filter = f"{concat_inputs}concat=n={num_videos}:v=1:a=1[outv][outa]"
-    filter_parts.append(concat_filter)
-
-    filter_complex_str = ";".join(filter_parts)
-
-    cmd.extend([
-        "-filter_complex", filter_complex_str,
-        "-map", "[outv]",
-        "-map", "[outa]",
-        "-c:v", vcodec_param,
-        "-preset", preset_speed,
-        "-crf", str(crf),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-ar", "44100",
-        "-ac", "2",
-        "-max_muxing_queue_size", "4096",
-        "-movflags", "+faststart",
-        "-progress", "pipe:1",
-        output_path
-    ])
-
-    if progress_callback:
-        progress_callback(5.0, "Procesando videos y optimizando calidad...")
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        bufsize=1
-    )
-
-    total_us = total_duration * 1_000_000
-    log_lines = []
-
-    # Stream real-time progress and logs safely from unified stdout pipe
-    if process.stdout:
-        for line in process.stdout:
-            line_str = line.strip()
-            if len(log_lines) > 50:
-                log_lines.pop(0)
-            log_lines.append(line_str)
-
-            if line_str.startswith("out_time_ms="):
-                try:
-                    out_us = int(line_str.split("=")[1])
-                    pct = min(98.0, max(5.0, (out_us / total_us) * 95.0))
-                    if progress_callback:
-                        progress_callback(round(pct, 1), f"Comprimiendo y uniendo videos... ({int(pct)}%)")
-                except (ValueError, IndexError):
-                    pass
-
-    process.wait()
-
-    if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+    try:
         if progress_callback:
-            progress_callback(100.0, "¡Video unido y comprimido con éxito!")
-        return True
-    else:
-        err_msg = "\n".join(log_lines[-20:]) if log_lines else "Unknown FFmpeg error"
-        print("FFmpeg Error:\n", err_msg)
-        return False
+            progress_callback(5.0, f"Iniciando optimización por bloques de {num_videos} videos...")
+
+        # Step 1: Normalize each clip individually (O(1) memory footprint - Addy Osmani principle)
+        vf = (
+            f"scale=w={target_w}:h={target_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad=w={target_w}:h={target_h}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
+            f"setsar=1,fps=30"
+        )
+
+        for i, v in enumerate(video_infos):
+            chunk_file = os.path.join(temp_dir, f"chunk_{i:04d}{chunk_ext}")
+            chunk_paths.append(chunk_file)
+
+            pct = 5.0 + (i / num_videos) * 85.0
+            if progress_callback:
+                progress_callback(round(pct, 1), f"Procesando video {i + 1} de {num_videos} ({int(pct)}%)...")
+
+            cmd = [ffmpeg, "-y", "-i", v["file_path"]]
+
+            if v.get("has_audio", False):
+                cmd.extend([
+                    "-vf", vf,
+                    "-c:v", vcodec_param,
+                    "-preset", preset_speed,
+                    "-crf", str(crf),
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-ar", "44100",
+                    "-ac", "2",
+                    "-avoid_negative_ts", "make_zero",
+                    "-fflags", "+genpts",
+                ])
+                if chunk_ext == ".ts":
+                    cmd.extend(["-f", "mpegts"])
+                cmd.append(chunk_file)
+            else:
+                dur = max(0.5, float(v.get("duration", 1.0)))
+                cmd.extend([
+                    "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:d={dur}",
+                    "-vf", vf,
+                    "-c:v", vcodec_param,
+                    "-preset", preset_speed,
+                    "-crf", str(crf),
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-ar", "44100",
+                    "-ac", "2",
+                    "-shortest",
+                    "-avoid_negative_ts", "make_zero",
+                    "-fflags", "+genpts",
+                ])
+                if chunk_ext == ".ts":
+                    cmd.extend(["-f", "mpegts"])
+                cmd.append(chunk_file)
+
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
+            if res.returncode != 0 or not os.path.exists(chunk_file) or os.path.getsize(chunk_file) < 512:
+                print(f"Error normalizando chunk {i}: {res.stderr}")
+                return False
+
+        # Step 2: Assemble all normalized chunks instantly with stream copy
+        if progress_callback:
+            progress_callback(92.0, "Ensamblando video final ultrarrápido...")
+
+        list_file = os.path.join(temp_dir, "chunks_list.txt")
+        with open(list_file, "w", encoding="utf-8") as f:
+            for cp in chunk_paths:
+                clean_p = os.path.abspath(cp).replace("\\", "/").replace("'", "'\\''")
+                f.write(f"file '{clean_p}'\n")
+
+        concat_cmd = [
+            ffmpeg, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_file,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            output_path
+        ]
+
+        res = subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
+
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            if progress_callback:
+                progress_callback(100.0, "¡Video unido y optimizado con éxito!")
+            return True
+        else:
+            print(f"Error concatenando chunks: {res.stderr}")
+            return False
+
+    finally:
+        if os.path.exists(temp_dir):
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
 

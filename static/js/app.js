@@ -138,7 +138,7 @@
     });
   }
 
-  // HTML5 Client-Side Metadata & Thumbnail Fallback
+  // HTML5 Client-Side Metadata & Thumbnail Fallback (Addy Osmani Memory & Performance Optimization)
   function extractVideoMetadata(file) {
     return new Promise((resolve) => {
       const video = document.createElement("video");
@@ -153,6 +153,12 @@
       const finish = (meta) => {
         if (!resolved) {
           resolved = true;
+          // Release video decode resources immediately to prevent memory leaks
+          try {
+            video.pause();
+            video.removeAttribute("src");
+            video.load();
+          } catch (e) {}
           resolve(meta);
         }
       };
@@ -171,22 +177,33 @@
           canvas.height = h;
           const ctx = canvas.getContext("2d");
           ctx.drawImage(video, 0, 0, w, h);
-          const thumbUrl = canvas.toDataURL("image/jpeg", 0.7);
 
-          finish({
-            duration: video.duration || 0,
-            width: video.videoWidth || 1920,
-            height: video.videoHeight || 1080,
-            thumbUrl: thumbUrl,
-            objUrl: objUrl
-          });
+          // Use Blob URL instead of heavy base64 to minimize V8 JS heap memory pressure
+          canvas.toBlob((blob) => {
+            const thumbUrl = blob ? URL.createObjectURL(blob) : "";
+            const hasAudio = Boolean(
+              video.mozHasAudio ||
+              video.webkitAudioDecodedByteCount ||
+              (video.audioTracks && video.audioTracks.length > 0)
+            );
+
+            finish({
+              duration: video.duration || 0,
+              width: video.videoWidth || 1920,
+              height: video.videoHeight || 1080,
+              thumbUrl: thumbUrl,
+              objUrl: objUrl,
+              hasAudio: hasAudio
+            });
+          }, "image/jpeg", 0.7);
         } catch (e) {
           finish({
             duration: video.duration || 0,
             width: video.videoWidth || 1920,
             height: video.videoHeight || 1080,
             thumbUrl: "",
-            objUrl: objUrl
+            objUrl: objUrl,
+            hasAudio: true
           });
         }
       };
@@ -197,7 +214,8 @@
           width: 1920,
           height: 1080,
           thumbUrl: "",
-          objUrl: objUrl
+          objUrl: objUrl,
+          hasAudio: true
         });
       };
 
@@ -208,7 +226,8 @@
           width: video.videoWidth || 1920,
           height: video.videoHeight || 1080,
           thumbUrl: "",
-          objUrl: objUrl
+          objUrl: objUrl,
+          hasAudio: true
         });
       }, 2500);
     });
@@ -426,6 +445,13 @@
       if (isServerMode && item.serverId) {
         fetch(`/api/items/${item.serverId}`, { method: "DELETE" }).catch(() => {});
       }
+      // Revoke Object URLs to prevent browser memory leaks (Addy Osmani)
+      if (item.streamUrl && item.streamUrl.startsWith("blob:")) {
+        try { URL.revokeObjectURL(item.streamUrl); } catch (err) {}
+      }
+      if (item.thumbUrl && item.thumbUrl.startsWith("blob:")) {
+        try { URL.revokeObjectURL(item.thumbUrl); } catch (err) {}
+      }
       items = items.filter(i => i.id !== item.id);
       renderList();
     });
@@ -493,6 +519,14 @@
       if (isServerMode) {
         fetch("/api/clear", { method: "POST" }).catch(() => {});
       }
+      items.forEach(item => {
+        if (item.streamUrl && item.streamUrl.startsWith("blob:")) {
+          try { URL.revokeObjectURL(item.streamUrl); } catch (err) {}
+        }
+        if (item.thumbUrl && item.thumbUrl.startsWith("blob:")) {
+          try { URL.revokeObjectURL(item.thumbUrl); } catch (err) {}
+        }
+      });
       items = [];
       renderList();
     }
@@ -609,7 +643,7 @@
     });
   }
 
-  // WebAssembly Fallback Engine Loader
+  // WebAssembly Engine Loader with Fast Local Fallback & Resilience
   async function getFFmpegWasm(forceReload = false) {
     if (forceReload && ffmpegWasm) {
       try {
@@ -630,24 +664,38 @@
     try {
       const { createFFmpeg } = FFmpeg;
       const hasSharedArrayBuffer = typeof SharedArrayBuffer !== "undefined";
-      const corePath = hasSharedArrayBuffer
-        ? "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js"
-        : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
 
-      ffmpegWasm = createFFmpeg({ log: true, corePath: corePath });
+      let corePath = "";
+      if (window.location.protocol.startsWith("http")) {
+        corePath = hasSharedArrayBuffer
+          ? "/static/js/ffmpeg-core.js"
+          : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
+      } else {
+        corePath = hasSharedArrayBuffer
+          ? "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js"
+          : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
+      }
+
+      ffmpegWasm = createFFmpeg({
+        log: false,
+        corePath: corePath
+      });
+
       ffmpegWasm.setProgress(({ ratio }) => {
         if (ratio >= 0 && ratio <= 1) {
           const pct = Math.min(99, Math.max(5, Math.round(ratio * 100)));
-          progressBar.style.width = `${pct}%`;
-          progressPct.textContent = `${pct}%`;
+          if (progressBar) progressBar.style.width = `${pct}%`;
+          if (progressPct) progressPct.textContent = `${pct}%`;
         }
       });
+
       await ffmpegWasm.load();
       return ffmpegWasm;
     } catch (err) {
+      console.warn("Fallback de ffmpeg-core vía CDN:", err);
       const { createFFmpeg } = FFmpeg;
       ffmpegWasm = createFFmpeg({
-        log: true,
+        log: false,
         corePath: "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js"
       });
       await ffmpegWasm.load();
@@ -657,7 +705,7 @@
     }
   }
 
-  // MAIN MERGE ACTION
+  // MAIN MERGE ACTION (Addy Osmani High-Performance Chunked Engine)
   btnStartMerge.addEventListener("click", async () => {
     if (isMerging) return;
     if (items.length < 2) {
@@ -669,10 +717,13 @@
     btnStartMerge.disabled = true;
 
     progressModal.classList.add("active");
-    progressBar.style.width = "5%";
-    progressPct.textContent = "5%";
-    modalProgressTitle.textContent = isServerMode ? "Procesando videos con FFmpeg Nativo..." : "Procesando en el Navegador...";
-    progressMessage.textContent = "Iniciando proceso de unión...";
+    if (progressBar) progressBar.style.width = "5%";
+    if (progressPct) progressPct.textContent = "5%";
+    if (modalProgressTitle) {
+      modalProgressTitle.textContent = isServerMode ? "Procesando videos con FFmpeg Nativo..." : "Procesando en el Navegador (WebAssembly)...";
+    }
+    if (progressSubTitle) progressSubTitle.textContent = "Procesando";
+    if (progressMessage) progressMessage.textContent = "Iniciando proceso de unión...";
 
     const customName = sanitizeFilename(outputFilename.value);
     currentDownloadName = customName;
@@ -712,9 +763,9 @@
           job = await jobRes.json();
 
           const pct = Math.min(99, Math.max(5, Math.round(job.progress || 0)));
-          progressBar.style.width = `${pct}%`;
-          progressPct.textContent = `${pct}%`;
-          progressMessage.textContent = job.message || "Procesando...";
+          if (progressBar) progressBar.style.width = `${pct}%`;
+          if (progressPct) progressPct.textContent = `${pct}%`;
+          if (progressMessage) progressMessage.textContent = job.message || "Procesando...";
 
           if (job.status === "completed" || job.status === "failed") {
             break;
@@ -726,8 +777,8 @@
         }
 
         // Finished successfully
-        progressBar.style.width = "100%";
-        progressPct.textContent = "100%";
+        if (progressBar) progressBar.style.width = "100%";
+        if (progressPct) progressPct.textContent = "100%";
         progressModal.classList.remove("active");
 
         currentOutputUrl = job.output_url;
@@ -752,32 +803,25 @@
       return;
     }
 
-    // PATH 2: BROWSER WEBASSEMBLY ENGINE (Fallback with complete bug fixes)
+    // PATH 2: BROWSER WEBASSEMBLY ENGINE (Addy Osmani High-Performance Chunked Architecture)
     let ff = null;
-    const inputNames = [];
+    const filesToCleanup = new Set();
     const outputVirtualFile = "output_merged.mp4";
 
     try {
-      progressMessage.textContent = "Cargando motor FFmpeg en el navegador...";
+      if (modalProgressTitle) modalProgressTitle.textContent = "Procesando en el Navegador (WebAssembly)...";
+      if (progressMessage) progressMessage.textContent = "Cargando motor de procesamiento WebAssembly...";
+      if (progressBar) progressBar.style.width = "5%";
+      if (progressPct) progressPct.textContent = "5%";
+
       ff = await getFFmpegWasm();
 
-      // Write files to virtual FS
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        const ext = (item.name.split('.').pop() || 'mp4').toLowerCase();
-        const virtualName = `input_${i}.${ext}`;
-        inputNames.push(virtualName);
-
-        progressMessage.textContent = `Preparando clip ${i + 1} de ${items.length}...`;
-        const data = await readFileAsArray(item.file);
-        ff.FS('writeFile', virtualName, data);
-      }
-
+      const num = items.length;
       const isCompress = compressToggle.checked;
       const mode = mergeMode.value;
       const preset = qualityPreset.value;
 
-      // Target resolution
+      // Determine target resolution
       let targetW = 1280;
       let targetH = 720;
       if (targetRes.value === "1080p") {
@@ -789,61 +833,155 @@
         if (targetH % 2 !== 0) targetH += 1;
       }
 
-      progressMessage.textContent = "Optimizando, normalizando audio y uniendo videos...";
-      progressBar.style.width = "30%";
-
       let crf = "23";
       if (preset === "lossless") crf = "18";
+      else if (preset === "high") crf = "21";
       else if (preset === "compact") crf = "28";
 
-      // Robust filtergraph: always pairs video and audio (with synthetic silence if needed)
-      const num = items.length;
-      let filterParts = [];
-      let concatInputs = "";
+      let mergeSucceeded = false;
 
-      for (let i = 0; i < num; i++) {
-        // Video: scale with force_divisible_by=2, pad to target, 30fps, setsar=1, reset PTS
-        filterParts.push(
-          `[${i}:v]scale=w=${targetW}:h=${targetH}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
-          `pad=w=${targetW}:h=${targetH}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,setsar=1,fps=30,setpts=PTS-STARTPTS[v${i}]`
-        );
-        // Audio: resample with asetpts, or generate silence
-        filterParts.push(
-          `[${i}:a]aresample=async=1000,aformat=sample_rates=44100:channel_layouts=stereo,asetpts=PTS-STARTPTS[a${i}]`
-        );
-        concatInputs += `[v${i}][a${i}]`;
+      // STRATEGY 1: FAST-PATH DIRECT STREAM COPY (Addy Osmani: "Fast by default")
+      // If user chose direct mode, or auto mode without compression: try instant stream copy
+      const tryDirect = (mode === "direct") || (mode === "auto" && !isCompress);
+      if (tryDirect) {
+        try {
+          if (progressMessage) progressMessage.textContent = "Intentando unión instantánea sin pérdida (Copia directa)...";
+          if (progressBar) progressBar.style.width = "15%";
+          if (progressPct) progressPct.textContent = "15%";
+          await new Promise(r => setTimeout(r, 20));
+
+          const directInputNames = [];
+          for (let i = 0; i < num; i++) {
+            const item = items[i];
+            const ext = (item.name.split('.').pop() || 'mp4').toLowerCase();
+            const vName = `direct_${i}.${ext}`;
+            directInputNames.push(vName);
+            filesToCleanup.add(vName);
+
+            const fileData = await readFileAsArray(item.file);
+            ff.FS('writeFile', vName, fileData);
+          }
+
+          // Build concat demuxer list
+          const concatListContent = directInputNames.map(n => `file '${n}'`).join('\n');
+          ff.FS('writeFile', 'concat_direct.txt', new TextEncoder().encode(concatListContent));
+          filesToCleanup.add('concat_direct.txt');
+
+          await ff.run(
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', 'concat_direct.txt',
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            '-y', outputVirtualFile
+          );
+          filesToCleanup.add(outputVirtualFile);
+
+          const checkData = ff.FS('readFile', outputVirtualFile);
+          if (checkData && checkData.length > 2048) {
+            mergeSucceeded = true;
+          }
+        } catch (directErr) {
+          console.warn("Copia directa no compatible con estos videos. Usando optimización por bloques...", directErr);
+          mergeSucceeded = false;
+        } finally {
+          // If direct copy failed, clean up direct inputs before starting chunked pipeline to free memory
+          if (!mergeSucceeded) {
+            for (const f of filesToCleanup) {
+              try { ff.FS('unlink', f); } catch (e) {}
+            }
+            filesToCleanup.clear();
+          }
+        }
       }
-      filterParts.push(`${concatInputs}concat=n=${num}:v=1:a=1[outv][outa]`);
 
-      const ffmpegArgs = [];
-      for (const name of inputNames) {
-        ffmpegArgs.push('-i', name);
+      // STRATEGY 2: CHUNKED NORMALIZATION PIPELINE (Addy Osmani: Divide & Conquer / O(1) Memory)
+      // Normalizes each clip sequentially into a temporary TS chunk.
+      // At any given moment, only ONE clip is in memory, preventing WebAssembly OOM and tab freezes!
+      if (!mergeSucceeded) {
+        const chunkNames = [];
+        const vf = `scale=w=${targetW}:h=${targetH}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=w=${targetW}:h=${targetH}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,setsar=1,fps=30`;
+
+        for (let i = 0; i < num; i++) {
+          const item = items[i];
+          const ext = (item.name.split('.').pop() || 'mp4').toLowerCase();
+          const inVirtual = `chunk_in_${i}.${ext}`;
+          const chunkVirtual = `chunk_${i}.ts`;
+          chunkNames.push(chunkVirtual);
+          filesToCleanup.add(chunkVirtual);
+
+          const pct = Math.round(5 + (i / num) * 85);
+          if (progressMessage) progressMessage.textContent = `Procesando y normalizando video ${i + 1} de ${num} (${pct}%)...`;
+          if (progressBar) progressBar.style.width = `${pct}%`;
+          if (progressPct) progressPct.textContent = `${pct}%`;
+
+          // Yield to main thread for smooth DOM updates and responsive UI
+          await new Promise(r => setTimeout(r, 25));
+
+          // 1. Write ONLY current clip into MEMFS
+          const fileData = await readFileAsArray(item.file);
+          ff.FS('writeFile', inVirtual, fileData);
+          filesToCleanup.add(inVirtual);
+
+          // 2. Normalize single clip
+          const transcodeArgs = [
+            '-i', inVirtual,
+            '-vf', vf,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', crf,
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-ac', '2',
+            '-f', 'mpegts',
+            '-y', chunkVirtual
+          ];
+
+          await ff.run(...transcodeArgs);
+
+          // 3. Immediately delete raw input from MEMFS to free linear memory (O(1) footprint)
+          try {
+            ff.FS('unlink', inVirtual);
+            filesToCleanup.delete(inVirtual);
+          } catch (e) {}
+
+          // Yield to main thread again
+          await new Promise(r => setTimeout(r, 25));
+        }
+
+        // 4. Assemble all normalized TS chunks losslessly with stream copy
+        if (progressMessage) progressMessage.textContent = "Ensamblando video final ultrarrápido... (92%)";
+        if (progressBar) progressBar.style.width = "92%";
+        if (progressPct) progressPct.textContent = "92%";
+        await new Promise(r => setTimeout(r, 25));
+
+        const tsListContent = chunkNames.map(n => `file '${n}'`).join('\n');
+        ff.FS('writeFile', 'chunks_list.txt', new TextEncoder().encode(tsListContent));
+        filesToCleanup.add('chunks_list.txt');
+
+        await ff.run(
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', 'chunks_list.txt',
+          '-c', 'copy',
+          '-movflags', '+faststart',
+          '-y', outputVirtualFile
+        );
+        filesToCleanup.add(outputVirtualFile);
       }
 
-      ffmpegArgs.push(
-        '-filter_complex', filterParts.join(';'),
-        '-map', '[outv]',
-        '-map', '[outa]',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', crf,
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-ar', '44100',
-        '-ac', '2',
-        '-max_muxing_queue_size', '4096',
-        '-movflags', '+faststart',
-        '-y', outputVirtualFile
-      );
-
-      await ff.run(...ffmpegArgs);
-
-      // Read output
-      progressMessage.textContent = "Finalizando y preparando descarga...";
-      progressBar.style.width = "95%";
+      // Read output file
+      if (progressMessage) progressMessage.textContent = "Finalizando y preparando descarga...";
+      if (progressBar) progressBar.style.width = "96%";
+      if (progressPct) progressPct.textContent = "96%";
 
       const outputData = ff.FS('readFile', outputVirtualFile);
+      if (!outputData || outputData.length < 1024) {
+        throw new Error("El archivo resultante no se generó correctamente o está vacío.");
+      }
+
       const safeBuffer = new Uint8Array(outputData.length);
       safeBuffer.set(outputData);
       const outBlob = new Blob([safeBuffer.buffer], { type: "video/mp4" });
@@ -852,17 +990,16 @@
       currentOutputBlob = outBlob;
       currentOutputUrl = outUrl;
 
-      // Cleanup virtual FS
-      for (const name of inputNames) {
-        try { ff.FS('unlink', name); } catch (e) {}
+      // Clean up all virtual files from MEMFS
+      for (const f of filesToCleanup) {
+        try { ff.FS('unlink', f); } catch (e) {}
       }
-      try { ff.FS('unlink', outputVirtualFile); } catch (e) {}
+      filesToCleanup.clear();
 
-      // Calculate total original duration
       let totalDuration = items.reduce((acc, curr) => acc + (curr.duration || 0), 0);
 
-      progressBar.style.width = "100%";
-      progressPct.textContent = "100%";
+      if (progressBar) progressBar.style.width = "100%";
+      if (progressPct) progressPct.textContent = "100%";
       progressModal.classList.remove("active");
 
       resultVideoPlayer.src = outUrl;
@@ -876,6 +1013,10 @@
     } catch (err) {
       console.error("Error al unir videos con WebAssembly:", err);
       progressModal.classList.remove("active");
+      // Clean up virtual files
+      for (const f of filesToCleanup) {
+        try { if (ff) ff.FS('unlink', f); } catch (e) {}
+      }
       await getFFmpegWasm(true); // Reset Wasm instance
       alert("Error al unir videos: " + (err.message || err));
     } finally {

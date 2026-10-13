@@ -80,15 +80,14 @@ async def upload_videos(files: List[UploadFile] = File(...)):
         file_path = os.path.join(UPLOADS_DIR, safe_name)
         thumb_path = os.path.join(UPLOADS_DIR, f"{item_id}_thumb.jpg")
 
-        # Save uploaded file
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(upload.file, f)
+        def save_and_probe(ufile, dst_path, t_path):
+            with open(dst_path, "wb") as f:
+                shutil.copyfileobj(ufile.file, f)
+            v_info = merger.get_video_info(dst_path)
+            merger.generate_thumbnail(dst_path, t_path, timestamp=1.0)
+            return v_info
 
-        # Extract metadata
-        info = merger.get_video_info(file_path)
-
-        # Generate thumbnail
-        merger.generate_thumbnail(file_path, thumb_path, timestamp=1.0)
+        info = await asyncio.to_thread(save_and_probe, upload, file_path, thumb_path)
 
         item = {
             "id": item_id,

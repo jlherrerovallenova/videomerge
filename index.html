@@ -203,19 +203,19 @@
       <div class="modal-header">
         <h3 class="panel-title">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
-          <span>Uniendo videos en tu navegador...</span>
+          <span id="modalProgressTitle">Uniendo videos...</span>
         </h3>
       </div>
       <div class="modal-body">
         <div class="progress-card">
           <div class="progress-header">
-            <span class="progress-title">Procesando WebAssembly</span>
+            <span class="progress-title" id="progressSubTitle">Procesando</span>
             <span class="progress-pct" id="progressPct">0%</span>
           </div>
           <div class="progress-track">
             <div class="progress-bar-fill" id="progressBar"></div>
           </div>
-          <p class="progress-message" id="progressMessage">Iniciando motor FFmpeg en el navegador...</p>
+          <p class="progress-message" id="progressMessage">Iniciando proceso...</p>
         </div>
       </div>
     </div>
