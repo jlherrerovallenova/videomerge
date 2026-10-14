@@ -2,7 +2,11 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="VideoMerger">
+  <meta name="theme-color" content="#0f172a">
   <title>Video Merger Web - Unir y Comprimir Videos en tu Navegador</title>
   <link rel="stylesheet" href="static/css/style.css">
   <!-- Enable Cross-Origin Isolation for WebAssembly when supported -->
@@ -39,11 +43,6 @@
     </div>
   </header>
  
-  <!-- Notification Banner when offline -->
-  <div id="backendBanner" class="alert-banner" style="display: none; max-width: 1200px; margin: 1.5rem auto -0.5rem auto; width: calc(100% - 3rem);">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-    <span><strong>Motor Nativo Desconectado:</strong> Para unir 7 o más videos al instante y sin límites de memoria del navegador, ejecuta <code>iniciar_app.bat</code> en la carpeta de la aplicación.</span>
-  </div>
 
   <!-- Main Container -->
   <main class="container">
@@ -258,12 +257,16 @@
         </div>
 
         <!-- Result Action Buttons -->
-        <div style="display: flex; gap: 10px; margin-top: 10px;">
-          <button type="button" id="btnDownloadResult" class="btn btn-primary" style="flex: 1; padding: 12px; font-size: 1rem; cursor: pointer;">
+        <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap;">
+          <button type="button" id="btnDownloadResult" class="btn btn-primary" style="flex: 1; min-width: 200px; padding: 12px; font-size: 1rem; cursor: pointer;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
             Descargar Video Resultante (.mp4)
           </button>
-          <button type="button" id="btnOpenFolder" class="btn btn-secondary" style="display: none; padding: 12px 18px; font-size: 1rem; cursor: pointer;" title="Abrir carpeta de salida en el Explorador de Windows">
+          <button type="button" id="btnShareResult" class="btn btn-secondary" style="display: none; padding: 12px 18px; font-size: 1rem; cursor: pointer;" title="Guardar en Fotos o Compartir (AirDrop, WhatsApp...)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+            Guardar en Fotos / Compartir
+          </button>
+          <button type="button" id="btnOpenFolder" class="btn btn-secondary" style="display: none; padding: 12px 18px; font-size: 1rem; cursor: pointer;" title="Abrir carpeta">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
             Abrir Carpeta
           </button>

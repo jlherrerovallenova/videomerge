@@ -326,11 +326,30 @@ async def open_output_folder():
 
 def open_browser():
     time.sleep(1.2)
-    webbrowser.open("http://127.0.0.1:8000")
+    try:
+        webbrowser.open("http://127.0.0.1:8000")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     import uvicorn
-    # Open browser automatically on launch
+    import socket
+
+    print("=" * 65)
+    print("        VIDEO MERGER STUDIO - SERVIDOR INICIADO")
+    print("=" * 65)
+    print("Acceso local en este ordenador:")
+    print("  👉 http://127.0.0.1:8000")
+    print("\nAcceso desde tu IPAD / Tablet / Móvil (misma red Wi-Fi):")
+    try:
+        hostname = socket.gethostname()
+        ips = socket.gethostbyname_ex(hostname)[2]
+        for ip in ips:
+            if not ip.startswith("127."):
+                print(f"  👉 http://{ip}:8000")
+    except Exception:
+        pass
+    print("=" * 65 + "\n")
+
     threading.Thread(target=open_browser, daemon=True).start()
-    print("Iniciando Video Merger Studio en http://127.0.0.1:8000 ...")
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

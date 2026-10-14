@@ -51,6 +51,7 @@
   const resResolution = document.getElementById("resResolution");
   const resSize = document.getElementById("resSize");
   const btnDownloadResult = document.getElementById("btnDownloadResult");
+  const btnShareResult = document.getElementById("btnShareResult");
   const btnOpenFolder = document.getElementById("btnOpenFolder");
   const btnCloseResult = document.getElementById("btnCloseResult");
 
@@ -103,15 +104,15 @@
           isServerMode = true;
           if (engineBadge) {
             engineBadge.className = "badge badge-emerald";
-            engineBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg> Motor Nativo FFmpeg 7 (Alta Velocidad)`;
+            engineBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg> Servidor FFmpeg Activo`;
           }
-          if (btnOpenFolder) {
+          if (btnOpenFolder && !/iPad|iPhone|iPod|Android/.test(navigator.userAgent)) {
             btnOpenFolder.style.display = "inline-flex";
           }
           if (backendBanner) {
             backendBanner.style.display = "none";
           }
-          console.log("Servidor FastAPI y motor FFmpeg nativo detectados y activos.");
+          console.log("Servidor backend detectado y activo.");
           return true;
         }
       }
@@ -120,13 +121,13 @@
     }
     isServerMode = false;
     if (engineBadge) {
-      engineBadge.className = "badge badge-amber";
-      engineBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg> Motor Nativo Desconectado`;
+      engineBadge.className = "badge badge-indigo";
+      engineBadge.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg> Motor WebAssembly (En Navegador / iPad)`;
     }
     if (backendBanner) {
-      backendBanner.style.display = "flex";
+      backendBanner.style.display = "none";
     }
-    console.log("Motor nativo desconectado. Para unir 7+ videos ejecuta iniciar_app.bat");
+    console.log("Ejecutando en modo WebAssembly en navegador.");
     return false;
   }
 
@@ -587,7 +588,7 @@
     if (e.target === resultModal) closeResult();
   });
 
-  // Open Windows Output Folder
+  // Open Output Folder (Desktop only)
   if (btnOpenFolder) {
     btnOpenFolder.addEventListener("click", async () => {
       try {
@@ -597,7 +598,7 @@
           alert("No se pudo abrir la carpeta automáticamente: " + (data.error || ""));
         }
       } catch (e) {
-        alert("Función disponible al ejecutar con iniciar_app.bat");
+        alert("Función disponible únicamente en el equipo donde se ejecuta el servidor.");
       }
     });
   }
@@ -647,6 +648,43 @@
     }
   });
 
+  // Native Share Sheet (Ideal for iPad / Safari to save directly to Photos)
+  if (btnShareResult) {
+    if (navigator.share) {
+      btnShareResult.style.display = "inline-flex";
+    }
+    btnShareResult.addEventListener("click", async () => {
+      try {
+        const filename = sanitizeFilename(currentDownloadName || "video_unido.mp4");
+        let fileToShare = null;
+
+        if (currentOutputBlob) {
+          fileToShare = new File([currentOutputBlob], filename, { type: "video/mp4" });
+        } else if (currentOutputUrl) {
+          const fetchRes = await fetch(currentOutputUrl);
+          const blob = await fetchRes.blob();
+          fileToShare = new File([blob], filename, { type: "video/mp4" });
+        }
+
+        if (fileToShare && navigator.canShare && navigator.canShare({ files: [fileToShare] })) {
+          await navigator.share({
+            files: [fileToShare],
+            title: filename
+          });
+        } else if (navigator.share) {
+          await navigator.share({
+            title: filename,
+            url: currentOutputUrl || window.location.href
+          });
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          console.warn("Compartir cancelado o no disponible:", err);
+        }
+      }
+    });
+  }
+
   // Read file as Uint8Array helper (for Wasm fallback)
   function readFileAsArray(file) {
     return new Promise((resolve, reject) => {
@@ -682,7 +720,7 @@
       let corePath = "";
       if (window.location.protocol.startsWith("http")) {
         corePath = hasSharedArrayBuffer
-          ? "/static/js/ffmpeg-core.js"
+          ? "static/js/ffmpeg-core.js"
           : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
       } else {
         corePath = hasSharedArrayBuffer
@@ -705,14 +743,14 @@
 
       const loadPromise = ffmpegWasm.load();
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Tiempo de espera agotado al descargar WebAssembly.")), 12000)
+        setTimeout(() => reject(new Error("Tiempo de espera agotado al descargar el motor WebAssembly.")), 15000)
       );
 
       await Promise.race([loadPromise, timeoutPromise]);
       return ffmpegWasm;
     } catch (err) {
       console.warn("Fallo cargando WebAssembly:", err);
-      throw new Error("No se pudo inicializar el motor en el navegador. Por favor ejecuta 'iniciar_app.bat' en la carpeta para usar el motor nativo de alta velocidad.");
+      throw new Error("No se pudo inicializar el motor de video en el navegador. Por favor recarga la página o verifica tu conexión.");
     } finally {
       isFFmpegLoading = false;
     }
@@ -838,16 +876,7 @@
       return;
     }
 
-    // Guard: If offline and user has 4 or more videos, warn them directly
-    if (items.length >= 4) {
-      progressModal.classList.remove("active");
-      isMerging = false;
-      btnStartMerge.disabled = false;
-      alert("⚠️ Motor Nativo Requerido:\n\nPara unir " + items.length + " videos sin congelamientos ni límites de memoria, por favor ejecuta 'iniciar_app.bat' en la carpeta de la aplicación.\n\nEl navegador no tiene suficiente memoria para procesar tantos videos simultáneos.");
-      return;
-    }
-
-    // PATH 2: BROWSER WEBASSEMBLY ENGINE (Addy Osmani High-Performance Chunked Architecture)
+    // PATH 2: BROWSER WEBASSEMBLY ENGINE (Sequential O(1) Memory Architecture)
     let ff = null;
     const filesToCleanup = new Set();
     const outputVirtualFile = "output_merged.mp4";
@@ -884,52 +913,67 @@
 
       let mergeSucceeded = false;
 
-      // STRATEGY 1: FAST-PATH DIRECT STREAM COPY (Addy Osmani: "Fast by default")
-      // If user chose direct mode, or auto mode without compression: try instant stream copy
+      // STRATEGY 1: PAIRWISE DIRECT STREAM COPY (Lossless & Fast - Ideal for iPad / Mobile)
+      // Combines clips one by one to keep memory consumption low on mobile Safari (O(1) Memory)
       const tryDirect = (mode === "direct") || (mode === "auto" && !isCompress);
       if (tryDirect) {
         try {
-          if (progressMessage) progressMessage.textContent = "Intentando unión instantánea sin pérdida (Copia directa)...";
-          if (progressBar) progressBar.style.width = "15%";
-          if (progressPct) progressPct.textContent = "15%";
+          if (progressMessage) progressMessage.textContent = "Iniciando unión directa sin pérdida...";
+          if (progressBar) progressBar.style.width = "10%";
+          if (progressPct) progressPct.textContent = "10%";
           await new Promise(r => setTimeout(r, 20));
 
-          const directInputNames = [];
-          for (let i = 0; i < num; i++) {
-            const item = items[i];
-            const ext = (item.name.split('.').pop() || 'mp4').toLowerCase();
-            const vName = `direct_${i}.${ext}`;
-            directInputNames.push(vName);
-            filesToCleanup.add(vName);
+          let currentAcc = "acc_0.mp4";
+          const firstData = await readFileAsArray(items[0].file);
+          ff.FS('writeFile', currentAcc, firstData);
+          filesToCleanup.add(currentAcc);
 
-            const fileData = await readFileAsArray(item.file);
-            ff.FS('writeFile', vName, fileData);
+          for (let i = 1; i < num; i++) {
+            const nextName = `next_${i}.mp4`;
+            const outStepName = `step_${i}.mp4`;
+            const pct = Math.round(10 + (i / num) * 80);
+
+            if (progressMessage) progressMessage.textContent = `Uniendo video ${i + 1} de ${num} (${pct}%)...`;
+            if (progressBar) progressBar.style.width = `${pct}%`;
+            if (progressPct) progressPct.textContent = `${pct}%`;
+            await new Promise(r => setTimeout(r, 25));
+
+            const nextData = await readFileAsArray(items[i].file);
+            ff.FS('writeFile', nextName, nextData);
+            filesToCleanup.add(nextName);
+
+            const pairList = `file '${currentAcc}'\nfile '${nextName}'`;
+            ff.FS('writeFile', 'pair.txt', new TextEncoder().encode(pairList));
+            filesToCleanup.add('pair.txt');
+
+            await ff.run(
+              '-f', 'concat',
+              '-safe', '0',
+              '-i', 'pair.txt',
+              '-c', 'copy',
+              '-movflags', '+faststart',
+              '-y', outStepName
+            );
+            filesToCleanup.add(outStepName);
+
+            try { ff.FS('unlink', currentAcc); filesToCleanup.delete(currentAcc); } catch(e) {}
+            try { ff.FS('unlink', nextName); filesToCleanup.delete(nextName); } catch(e) {}
+            try { ff.FS('unlink', 'pair.txt'); filesToCleanup.delete('pair.txt'); } catch(e) {}
+
+            currentAcc = outStepName;
           }
 
-          // Build concat demuxer list
-          const concatListContent = directInputNames.map(n => `file '${n}'`).join('\n');
-          ff.FS('writeFile', 'concat_direct.txt', new TextEncoder().encode(concatListContent));
-          filesToCleanup.add('concat_direct.txt');
-
-          await ff.run(
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', 'concat_direct.txt',
-            '-c', 'copy',
-            '-movflags', '+faststart',
-            '-y', outputVirtualFile
-          );
-          filesToCleanup.add(outputVirtualFile);
-
-          const checkData = ff.FS('readFile', outputVirtualFile);
+          const checkData = ff.FS('readFile', currentAcc);
           if (checkData && checkData.length > 2048) {
+            ff.FS('writeFile', outputVirtualFile, checkData);
+            filesToCleanup.add(outputVirtualFile);
+            try { ff.FS('unlink', currentAcc); filesToCleanup.delete(currentAcc); } catch(e) {}
             mergeSucceeded = true;
           }
         } catch (directErr) {
-          console.warn("Copia directa no compatible con estos videos. Usando optimización por bloques...", directErr);
+          console.warn("Copia directa por pares no completada. Intentando método por bloques...", directErr);
           mergeSucceeded = false;
         } finally {
-          // If direct copy failed, clean up direct inputs before starting chunked pipeline to free memory
           if (!mergeSucceeded) {
             for (const f of filesToCleanup) {
               try { ff.FS('unlink', f); } catch (e) {}
