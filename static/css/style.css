@@ -624,10 +624,11 @@ input:checked + .slider:before {
   width: 100%;
 }
 
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.btn:disabled, .btn-disabled {
+  opacity: 0.55;
+  cursor: pointer;
   transform: none !important;
+  filter: grayscale(0.2);
 }
 
 /* Modal */

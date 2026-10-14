@@ -9,8 +9,6 @@
   <meta name="theme-color" content="#0f172a">
   <title>Video Merger Web - Unir y Comprimir Videos en tu Navegador</title>
   <link rel="stylesheet" href="static/css/style.css">
-  <!-- Enable Cross-Origin Isolation for WebAssembly when supported -->
-  <script src="coi-serviceworker.js"></script>
   <!-- Offline Libraries for 100% Client-Side Web Execution -->
   <script src="static/js/sortable.min.js"></script>
   <script src="static/js/ffmpeg.min.js"></script>
@@ -210,6 +208,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
           <span id="modalProgressTitle">Uniendo videos...</span>
         </h3>
+        <button class="btn-icon" id="btnCloseProgress" style="display: none;" title="Cerrar">✕</button>
       </div>
       <div class="modal-body">
         <div class="progress-card">
@@ -221,6 +220,7 @@
             <div class="progress-bar-fill" id="progressBar"></div>
           </div>
           <p class="progress-message" id="progressMessage">Iniciando proceso...</p>
+          <button type="button" id="btnDismissProgressError" class="btn btn-secondary" style="display: none; width: 100%; margin-top: 15px;">Cerrar y volver</button>
         </div>
       </div>
     </div>

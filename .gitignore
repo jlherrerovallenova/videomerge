@@ -4,5 +4,4 @@ uploads/
 output/
 .DS_Store
 Thumbs.db
-*.wasm
-static/js/ffmpeg-core.*
+

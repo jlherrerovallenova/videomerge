@@ -44,6 +44,52 @@
   const progressBar = document.getElementById("progressBar");
   const progressPct = document.getElementById("progressPct");
   const progressMessage = document.getElementById("progressMessage");
+  const btnCloseProgress = document.getElementById("btnCloseProgress");
+  const btnDismissProgressError = document.getElementById("btnDismissProgressError");
+
+  function showProgressError(errorMessage) {
+    if (modalProgressTitle) modalProgressTitle.textContent = "Error en la unión";
+    if (progressSubTitle) progressSubTitle.textContent = "Error";
+    if (progressBar) progressBar.style.backgroundColor = "#ef4444";
+    if (progressMessage) {
+      progressMessage.textContent = errorMessage;
+      progressMessage.style.color = "#f87171";
+    }
+    if (btnCloseProgress) btnCloseProgress.style.display = "inline-flex";
+    if (btnDismissProgressError) btnDismissProgressError.style.display = "block";
+  }
+
+  function resetProgressModal() {
+    progressModal.classList.remove("active");
+    if (progressBar) {
+      progressBar.style.backgroundColor = "";
+      progressBar.style.width = "0%";
+    }
+    if (progressPct) progressPct.textContent = "0%";
+    if (progressMessage) {
+      progressMessage.style.color = "";
+      progressMessage.textContent = "Iniciando proceso...";
+    }
+    if (btnCloseProgress) btnCloseProgress.style.display = "none";
+    if (btnDismissProgressError) btnDismissProgressError.style.display = "none";
+  }
+
+  if (btnCloseProgress) btnCloseProgress.addEventListener("click", resetProgressModal);
+  if (btnDismissProgressError) btnDismissProgressError.addEventListener("click", resetProgressModal);
+
+  function updateMergeButtonState() {
+    if (isMerging) {
+      btnStartMerge.disabled = true;
+      btnStartMerge.classList.add("btn-disabled");
+    } else {
+      btnStartMerge.disabled = false;
+      if (items.length < 2) {
+        btnStartMerge.classList.add("btn-disabled");
+      } else {
+        btnStartMerge.classList.remove("btn-disabled");
+      }
+    }
+  }
 
   const resultModal = document.getElementById("resultModal");
   const resultVideoPlayer = document.getElementById("resultVideoPlayer");
@@ -384,10 +430,8 @@
     if (items.length === 0) {
       videoList.appendChild(emptyState);
       emptyState.style.display = "flex";
-      btnStartMerge.disabled = true;
     } else {
       emptyState.style.display = "none";
-      btnStartMerge.disabled = items.length < 2;
 
       items.forEach((item, index) => {
         const card = createCard(item, index);
@@ -395,6 +439,7 @@
       });
       initSortable();
     }
+    updateMergeButtonState();
 
     updateStats();
     updateOrderBadges();
@@ -695,7 +740,7 @@
     });
   }
 
-  // WebAssembly Engine Loader with Fast Local Fallback & Resilience
+  // WebAssembly Engine Loader - 100% Local Self-Hosted & Robust
   async function getFFmpegWasm(forceReload = false) {
     if (forceReload && ffmpegWasm) {
       try {
@@ -714,23 +759,19 @@
 
     isFFmpegLoading = true;
     try {
-      const { createFFmpeg } = FFmpeg;
-      const hasSharedArrayBuffer = typeof SharedArrayBuffer !== "undefined";
-
-      let corePath = "";
-      if (window.location.protocol.startsWith("http")) {
-        corePath = hasSharedArrayBuffer
-          ? "static/js/ffmpeg-core.js"
-          : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
-      } else {
-        corePath = hasSharedArrayBuffer
-          ? "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js"
-          : "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js";
+      if (typeof FFmpeg === "undefined" || !FFmpeg.createFFmpeg) {
+        throw new Error("Librería FFmpeg WebAssembly no disponible en la página.");
       }
 
+      const { createFFmpeg } = FFmpeg;
+
+      // Always resolve local corePath relative to current document (works on GitHub Pages, localhost, file://, etc.)
+      const corePath = new URL("static/js/ffmpeg-core.js", window.location.href).href;
+
       ffmpegWasm = createFFmpeg({
-        log: false,
-        corePath: corePath
+        log: true,
+        corePath: corePath,
+        mainName: "main"
       });
 
       ffmpegWasm.setProgress(({ ratio }) => {
@@ -743,14 +784,18 @@
 
       const loadPromise = ffmpegWasm.load();
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Tiempo de espera agotado al descargar el motor WebAssembly.")), 15000)
+        setTimeout(() => reject(new Error("Tiempo de espera agotado al inicializar el motor de video.")), 40000)
       );
 
       await Promise.race([loadPromise, timeoutPromise]);
       return ffmpegWasm;
     } catch (err) {
       console.warn("Fallo cargando WebAssembly:", err);
-      throw new Error("No se pudo inicializar el motor de video en el navegador. Por favor recarga la página o verifica tu conexión.");
+      try {
+        if (ffmpegWasm && typeof ffmpegWasm.exit === "function") ffmpegWasm.exit();
+      } catch (e) {}
+      ffmpegWasm = null;
+      throw new Error("No se pudo inicializar el motor de video en el navegador: " + (err.message || err));
     } finally {
       isFFmpegLoading = false;
     }
@@ -760,13 +805,14 @@
   btnStartMerge.addEventListener("click", async () => {
     if (isMerging) return;
     if (items.length < 2) {
-      alert("Por favor añade al menos 2 videos para unir.");
+      alert("Por favor añade al menos 2 videos a la lista para poder unirlos.");
       return;
     }
 
     isMerging = true;
-    btnStartMerge.disabled = true;
+    updateMergeButtonState();
 
+    resetProgressModal();
     progressModal.classList.add("active");
     if (progressBar) progressBar.style.width = "5%";
     if (progressPct) progressPct.textContent = "5%";
@@ -778,11 +824,6 @@
 
     const customName = sanitizeFilename(outputFilename.value);
     currentDownloadName = customName;
-
-    // Refresh backend connectivity
-    if (!isServerMode) {
-      await checkBackend();
-    }
 
     // PATH 1: NATIVE PYTHON BACKEND (High-Speed & Error-Free)
     if (isServerMode) {
@@ -867,11 +908,11 @@
 
       } catch (err) {
         console.error("Error en servidor backend:", err);
-        progressModal.classList.remove("active");
+        showProgressError("Error al unir videos: " + (err.message || err));
         alert("Error al unir videos: " + (err.message || err));
       } finally {
         isMerging = false;
-        btnStartMerge.disabled = items.length < 2;
+        updateMergeButtonState();
       }
       return;
     }
@@ -1100,16 +1141,19 @@
 
     } catch (err) {
       console.error("Error al unir videos con WebAssembly:", err);
-      progressModal.classList.remove("active");
-      // Clean up virtual files
       for (const f of filesToCleanup) {
         try { if (ff) ff.FS('unlink', f); } catch (e) {}
       }
-      await getFFmpegWasm(true); // Reset Wasm instance
+      try {
+        if (ffmpegWasm && typeof ffmpegWasm.exit === "function") ffmpegWasm.exit();
+      } catch (e) {}
+      ffmpegWasm = null;
+
+      showProgressError("Error al unir videos: " + (err.message || err));
       alert("Error al unir videos: " + (err.message || err));
     } finally {
       isMerging = false;
-      btnStartMerge.disabled = items.length < 2;
+      updateMergeButtonState();
     }
   });
 
