@@ -339,14 +339,14 @@ if __name__ == "__main__":
     print("        VIDEO MERGER STUDIO - SERVIDOR INICIADO")
     print("=" * 65)
     print("Acceso local en este ordenador:")
-    print("  👉 http://127.0.0.1:8000")
-    print("\nAcceso desde tu IPAD / Tablet / Móvil (misma red Wi-Fi):")
+    print("  -> http://127.0.0.1:8000")
+    print("\nAcceso desde tu IPAD / Tablet / Movil (misma red Wi-Fi):")
     try:
         hostname = socket.gethostname()
         ips = socket.gethostbyname_ex(hostname)[2]
         for ip in ips:
             if not ip.startswith("127."):
-                print(f"  👉 http://{ip}:8000")
+                print(f"  -> http://{ip}:8000")
     except Exception:
         pass
     print("=" * 65 + "\n")
