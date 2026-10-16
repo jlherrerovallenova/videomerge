@@ -7,6 +7,8 @@ import tempfile
 from typing import Dict, Any, List, Optional, Callable
 import imageio_ffmpeg
 
+LAST_ERROR: str = ""
+
 def get_ffmpeg() -> str:
     """Returns absolute path to ffmpeg executable."""
     return imageio_ffmpeg.get_ffmpeg_exe()
@@ -203,6 +205,8 @@ def merge_videos_stream_copy(
             if progress_callback:
                 progress_callback(100.0, "¡Unión completada!")
             return True
+        global LAST_ERROR
+        LAST_ERROR = f"Error en copia directa: {proc.stderr[-300:] if proc.stderr else 'código ' + str(proc.returncode)}"
         return False
     finally:
         if os.path.exists(list_file):
@@ -371,6 +375,8 @@ def merge_videos_reencode(
                     err_file.seek(0)
                     err_out = err_file.read().decode("utf-8", errors="replace")
                     print(f"Error normalizando chunk {i}: {err_out}")
+                    global LAST_ERROR
+                    LAST_ERROR = f"Error en video {i + 1}: {err_out[-250:] if err_out else 'fallo en FFmpeg'}"
                     return False
 
         # Step 2: Assemble all normalized chunks instantly with stream copy
@@ -401,6 +407,7 @@ def merge_videos_reencode(
             return True
         else:
             print(f"Error concatenando chunks: {res.stderr}")
+            LAST_ERROR = f"Error ensamblando video final: {res.stderr[-250:] if res.stderr else 'fallo en FFmpeg'}"
             return False
 
     finally:

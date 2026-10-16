@@ -741,63 +741,97 @@
   }
 
   // WebAssembly Engine Loader - 100% Local Self-Hosted & Robust
-  async function getFFmpegWasm(forceReload = false) {
-    if (forceReload && ffmpegWasm) {
-      try {
-        if (typeof ffmpegWasm.exit === "function") ffmpegWasm.exit();
-      } catch (e) {}
-      ffmpegWasm = null;
-    }
-    if (ffmpegWasm && ffmpegWasm.isLoaded()) return ffmpegWasm;
+  let wasmCore = null;
+  let wasmLoading = false;
+  let wasmProgressCallback = null;
+  let wasmCurrentDuration = 1.0;
 
-    if (isFFmpegLoading) {
-      while (isFFmpegLoading) {
-        await new Promise(r => setTimeout(r, 200));
+  async function getWasmEngine() {
+    if (wasmCore) return wasmCore;
+    if (wasmLoading) {
+      while (wasmLoading) {
+        await new Promise(r => setTimeout(r, 100));
       }
-      if (ffmpegWasm && ffmpegWasm.isLoaded()) return ffmpegWasm;
+      if (wasmCore) return wasmCore;
     }
 
-    isFFmpegLoading = true;
+    wasmLoading = true;
     try {
-      if (typeof FFmpeg === "undefined" || !FFmpeg.createFFmpeg) {
-        throw new Error("Librería FFmpeg WebAssembly no disponible en la página.");
+      if (typeof window.createFFmpegCore === "undefined") {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = new URL("static/js/ffmpeg-core.js", window.location.href).href;
+          s.onload = resolve;
+          s.onerror = () => reject(new Error("No se pudo cargar ffmpeg-core.js. Verifica que los archivos estáticos existan."));
+          document.head.appendChild(s);
+        });
       }
 
-      const { createFFmpeg } = FFmpeg;
-
-      // Always resolve local corePath relative to current document (works on GitHub Pages, localhost, file://, etc.)
-      const corePath = new URL("static/js/ffmpeg-core.js", window.location.href).href;
-
-      ffmpegWasm = createFFmpeg({
-        log: true,
-        corePath: corePath,
-        mainName: "main"
-      });
-
-      ffmpegWasm.setProgress(({ ratio }) => {
-        if (ratio >= 0 && ratio <= 1) {
-          const pct = Math.min(99, Math.max(5, Math.round(ratio * 100)));
-          if (progressBar) progressBar.style.width = `${pct}%`;
-          if (progressPct) progressPct.textContent = `${pct}%`;
+      const core = await window.createFFmpegCore({
+        locateFile: (path, prefix) => {
+          if (path.endsWith("ffmpeg-core.wasm")) {
+            return new URL("static/js/ffmpeg-core.wasm", window.location.href).href;
+          }
+          return prefix + path;
+        },
+        print: (msg) => {
+          console.log("[Wasm FFmpeg]", msg);
+        },
+        printErr: (msg) => {
+          if (wasmProgressCallback && typeof msg === "string") {
+            const m = msg.match(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
+            if (m) {
+              const sec = parseFloat(m[1]) * 3600 + parseFloat(m[2]) * 60 + parseFloat(m[3]);
+              const ratio = Math.min(1.0, Math.max(0.0, sec / (wasmCurrentDuration || 1.0)));
+              wasmProgressCallback(ratio);
+            }
+          }
         }
       });
 
-      const loadPromise = ffmpegWasm.load();
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Tiempo de espera agotado al inicializar el motor de video.")), 40000)
-      );
+      wasmCore = {
+        core: core,
+        FS: core.FS,
+        async run(args, duration = 1.0, onProgress = null) {
+          wasmCurrentDuration = duration > 0 ? duration : 1.0;
+          wasmProgressCallback = onProgress;
+          const fullArgs = ["ffmpeg", "-nostdin", "-y", ...args];
+          const argc = fullArgs.length;
+          const argv = core._malloc((argc + 1) * 4);
+          const ptrs = [];
+          for (let i = 0; i < argc; i++) {
+            const len = core.lengthBytesUTF8(fullArgs[i]) + 1;
+            const ptr = core._malloc(len);
+            core.stringToUTF8(fullArgs[i], ptr, len);
+            core.setValue(argv + i * 4, ptr, 'i32');
+            ptrs.push(ptr);
+          }
+          core.setValue(argv + argc * 4, 0, 'i32');
 
-      await Promise.race([loadPromise, timeoutPromise]);
-      return ffmpegWasm;
+          try {
+            core._main(argc, argv);
+          } catch (err) {
+            if (err && (err.status === 0 || (err.name === 'ExitStatus' && err.status === 0))) {
+              // Status 0: Clean exit
+            } else {
+              throw err;
+            }
+          } finally {
+            for (const p of ptrs) {
+              try { core._free(p); } catch (e) {}
+            }
+            try { core._free(argv); } catch (e) {}
+            wasmProgressCallback = null;
+          }
+        }
+      };
+
+      return wasmCore;
     } catch (err) {
-      console.warn("Fallo cargando WebAssembly:", err);
-      try {
-        if (ffmpegWasm && typeof ffmpegWasm.exit === "function") ffmpegWasm.exit();
-      } catch (e) {}
-      ffmpegWasm = null;
-      throw new Error("No se pudo inicializar el motor de video en el navegador: " + (err.message || err));
+      wasmCore = null;
+      throw new Error("No se pudo iniciar el motor WebAssembly en el navegador: " + (err.message || err));
     } finally {
-      isFFmpegLoading = false;
+      wasmLoading = false;
     }
   }
 
@@ -825,6 +859,11 @@
     const customName = sanitizeFilename(outputFilename.value);
     currentDownloadName = customName;
 
+    // Refresh backend connectivity to prioritize high-speed Python engine if available
+    if (!isServerMode) {
+      await checkBackend();
+    }
+
     // PATH 1: NATIVE PYTHON BACKEND (High-Speed & Error-Free)
     if (isServerMode) {
       try {
@@ -845,8 +884,13 @@
           }
         }
 
+        const validIds = items.map(i => i.serverId).filter(Boolean);
+        if (validIds.length < 2) {
+          throw new Error("No se pudieron registrar suficientes videos en el servidor.");
+        }
+
         const payload = {
-          video_ids: items.map(i => i.serverId),
+          video_ids: validIds,
           mode: mergeMode.value,
           compress: compressToggle.checked,
           preset: qualityPreset.value,
@@ -918,7 +962,7 @@
     }
 
     // PATH 2: BROWSER WEBASSEMBLY ENGINE (Sequential O(1) Memory Architecture)
-    let ff = null;
+    let wasm = null;
     const filesToCleanup = new Set();
     const outputVirtualFile = "output_merged.mp4";
 
@@ -928,7 +972,7 @@
       if (progressBar) progressBar.style.width = "5%";
       if (progressPct) progressPct.textContent = "5%";
 
-      ff = await getFFmpegWasm();
+      wasm = await getWasmEngine();
 
       const num = items.length;
       const isCompress = compressToggle.checked;
@@ -954,82 +998,60 @@
 
       let mergeSucceeded = false;
 
-      // STRATEGY 1: PAIRWISE DIRECT STREAM COPY (Lossless & Fast - Ideal for iPad / Mobile)
-      // Combines clips one by one to keep memory consumption low on mobile Safari (O(1) Memory)
-      const tryDirect = (mode === "direct") || (mode === "auto" && !isCompress);
-      if (tryDirect) {
+      // STRATEGY 1: DIRECT STREAM COPY (When mode is direct and clips match)
+      if (mode === "direct") {
         try {
-          if (progressMessage) progressMessage.textContent = "Iniciando unión directa sin pérdida...";
+          if (progressMessage) progressMessage.textContent = "Intentando unión instantánea sin pérdida (Copia directa)...";
           if (progressBar) progressBar.style.width = "10%";
           if (progressPct) progressPct.textContent = "10%";
           await new Promise(r => setTimeout(r, 20));
 
-          let currentAcc = "acc_0.mp4";
-          const firstData = await readFileAsArray(items[0].file);
-          ff.FS('writeFile', currentAcc, firstData);
-          filesToCleanup.add(currentAcc);
-
-          for (let i = 1; i < num; i++) {
-            const nextName = `next_${i}.mp4`;
-            const outStepName = `step_${i}.mp4`;
-            const pct = Math.round(10 + (i / num) * 80);
-
-            if (progressMessage) progressMessage.textContent = `Uniendo video ${i + 1} de ${num} (${pct}%)...`;
-            if (progressBar) progressBar.style.width = `${pct}%`;
-            if (progressPct) progressPct.textContent = `${pct}%`;
-            await new Promise(r => setTimeout(r, 25));
-
-            const nextData = await readFileAsArray(items[i].file);
-            ff.FS('writeFile', nextName, nextData);
-            filesToCleanup.add(nextName);
-
-            const pairList = `file '${currentAcc}'\nfile '${nextName}'`;
-            ff.FS('writeFile', 'pair.txt', new TextEncoder().encode(pairList));
-            filesToCleanup.add('pair.txt');
-
-            await ff.run(
-              '-f', 'concat',
-              '-safe', '0',
-              '-i', 'pair.txt',
-              '-c', 'copy',
-              '-movflags', '+faststart',
-              '-y', outStepName
-            );
-            filesToCleanup.add(outStepName);
-
-            try { ff.FS('unlink', currentAcc); filesToCleanup.delete(currentAcc); } catch(e) {}
-            try { ff.FS('unlink', nextName); filesToCleanup.delete(nextName); } catch(e) {}
-            try { ff.FS('unlink', 'pair.txt'); filesToCleanup.delete('pair.txt'); } catch(e) {}
-
-            currentAcc = outStepName;
+          const directNames = [];
+          for (let i = 0; i < num; i++) {
+            const inName = `direct_in_${i}.mp4`;
+            directNames.push(inName);
+            const fileData = await readFileAsArray(items[i].file);
+            wasm.FS.writeFile(inName, fileData);
+            filesToCleanup.add(inName);
           }
 
-          const checkData = ff.FS('readFile', currentAcc);
+          const directList = directNames.map(n => `file '${n}'`).join('\n') + '\n';
+          wasm.FS.writeFile('direct_list.txt', new TextEncoder().encode(directList));
+          filesToCleanup.add('direct_list.txt');
+
+          await wasm.run([
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', 'direct_list.txt',
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            outputVirtualFile
+          ]);
+          filesToCleanup.add(outputVirtualFile);
+
+          const checkData = wasm.FS.readFile(outputVirtualFile);
           if (checkData && checkData.length > 2048) {
-            ff.FS('writeFile', outputVirtualFile, checkData);
-            filesToCleanup.add(outputVirtualFile);
-            try { ff.FS('unlink', currentAcc); filesToCleanup.delete(currentAcc); } catch(e) {}
             mergeSucceeded = true;
           }
         } catch (directErr) {
-          console.warn("Copia directa por pares no completada. Intentando método por bloques...", directErr);
+          console.warn("Copia directa no soportada para estos clips. Pasando a normalización por bloques...", directErr);
           mergeSucceeded = false;
         } finally {
           if (!mergeSucceeded) {
             for (const f of filesToCleanup) {
-              try { ff.FS('unlink', f); } catch (e) {}
+              try { wasm.FS.unlink(f); } catch (e) {}
             }
             filesToCleanup.clear();
           }
         }
       }
 
-      // STRATEGY 2: CHUNKED NORMALIZATION PIPELINE (Addy Osmani: Divide & Conquer / O(1) Memory)
-      // Normalizes each clip sequentially into a temporary TS chunk.
-      // At any given moment, only ONE clip is in memory, preventing WebAssembly OOM and tab freezes!
+      // STRATEGY 2: ROCK-SOLID CHUNKED NORMALIZATION (100% Guaranteed Compatibility & Audio Sync)
       if (!mergeSucceeded) {
         const chunkNames = [];
         const vf = `scale=w=${targetW}:h=${targetH}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=w=${targetW}:h=${targetH}:x=(ow-iw)/2:y=(oh-ih)/2:color=black,setsar=1,fps=30`;
+        const totalWeight = 85.0;
+        const chunkWeight = totalWeight / num;
 
         for (let i = 0; i < num; i++) {
           const item = items[i];
@@ -1039,21 +1061,20 @@
           chunkNames.push(chunkVirtual);
           filesToCleanup.add(chunkVirtual);
 
-          const pct = Math.round(5 + (i / num) * 85);
-          if (progressMessage) progressMessage.textContent = `Procesando y normalizando video ${i + 1} de ${num} (${pct}%)...`;
-          if (progressBar) progressBar.style.width = `${pct}%`;
-          if (progressPct) progressPct.textContent = `${pct}%`;
+          const basePct = 5 + i * chunkWeight;
+          if (progressMessage) progressMessage.textContent = `Optimizando video ${i + 1} de ${num} (${Math.round(basePct)}%)...`;
+          if (progressBar) progressBar.style.width = `${Math.round(basePct)}%`;
+          if (progressPct) progressPct.textContent = `${Math.round(basePct)}%`;
+          await new Promise(r => setTimeout(r, 20));
 
-          // Yield to main thread for smooth DOM updates and responsive UI
-          await new Promise(r => setTimeout(r, 25));
-
-          // 1. Write ONLY current clip into MEMFS
+          // 1. Write current input file into MEMFS
           const fileData = await readFileAsArray(item.file);
-          ff.FS('writeFile', inVirtual, fileData);
+          wasm.FS.writeFile(inVirtual, fileData);
           filesToCleanup.add(inVirtual);
 
-          // 2. Normalize single clip
-          const transcodeArgs = [
+          // 2. Transcode chunk to uniform MPEG-TS (ultrafast libx264 + aac 44100Hz stereo)
+          const dur = Math.max(0.5, item.duration || 1.0);
+          await wasm.run([
             '-i', inVirtual,
             '-vf', vf,
             '-c:v', 'libx264',
@@ -1065,39 +1086,40 @@
             '-ar', '44100',
             '-ac', '2',
             '-f', 'mpegts',
-            '-y', chunkVirtual
-          ];
+            chunkVirtual
+          ], dur, (ratio) => {
+            const currentPct = Math.min(90, Math.round(basePct + ratio * chunkWeight));
+            if (progressBar) progressBar.style.width = `${currentPct}%`;
+            if (progressPct) progressPct.textContent = `${currentPct}%`;
+          });
 
-          await ff.run(...transcodeArgs);
-
-          // 3. Immediately delete raw input from MEMFS to free linear memory (O(1) footprint)
+          // 3. Delete raw input file immediately to free memory (O(1) memory footprint)
           try {
-            ff.FS('unlink', inVirtual);
+            wasm.FS.unlink(inVirtual);
             filesToCleanup.delete(inVirtual);
           } catch (e) {}
 
-          // Yield to main thread again
-          await new Promise(r => setTimeout(r, 25));
+          await new Promise(r => setTimeout(r, 20));
         }
 
-        // 4. Assemble all normalized TS chunks losslessly with stream copy
+        // 4. Assemble all normalized chunks into final MP4 instantly with stream copy
         if (progressMessage) progressMessage.textContent = "Ensamblando video final ultrarrápido... (92%)";
         if (progressBar) progressBar.style.width = "92%";
         if (progressPct) progressPct.textContent = "92%";
-        await new Promise(r => setTimeout(r, 25));
+        await new Promise(r => setTimeout(r, 20));
 
-        const tsListContent = chunkNames.map(n => `file '${n}'`).join('\n');
-        ff.FS('writeFile', 'chunks_list.txt', new TextEncoder().encode(tsListContent));
+        const tsListContent = chunkNames.map(n => `file '${n}'`).join('\n') + '\n';
+        wasm.FS.writeFile('chunks_list.txt', new TextEncoder().encode(tsListContent));
         filesToCleanup.add('chunks_list.txt');
 
-        await ff.run(
+        await wasm.run([
           '-f', 'concat',
           '-safe', '0',
           '-i', 'chunks_list.txt',
           '-c', 'copy',
           '-movflags', '+faststart',
-          '-y', outputVirtualFile
-        );
+          outputVirtualFile
+        ]);
         filesToCleanup.add(outputVirtualFile);
       }
 
@@ -1106,7 +1128,7 @@
       if (progressBar) progressBar.style.width = "96%";
       if (progressPct) progressPct.textContent = "96%";
 
-      const outputData = ff.FS('readFile', outputVirtualFile);
+      const outputData = wasm.FS.readFile(outputVirtualFile);
       if (!outputData || outputData.length < 1024) {
         throw new Error("El archivo resultante no se generó correctamente o está vacío.");
       }
@@ -1121,7 +1143,7 @@
 
       // Clean up all virtual files from MEMFS
       for (const f of filesToCleanup) {
-        try { ff.FS('unlink', f); } catch (e) {}
+        try { wasm.FS.unlink(f); } catch (e) {}
       }
       filesToCleanup.clear();
 
@@ -1142,12 +1164,9 @@
     } catch (err) {
       console.error("Error al unir videos con WebAssembly:", err);
       for (const f of filesToCleanup) {
-        try { if (ff) ff.FS('unlink', f); } catch (e) {}
+        try { if (wasm && wasm.FS) wasm.FS.unlink(f); } catch (e) {}
       }
-      try {
-        if (ffmpegWasm && typeof ffmpegWasm.exit === "function") ffmpegWasm.exit();
-      } catch (e) {}
-      ffmpegWasm = null;
+      wasmCore = null; // Reset wasm core on error so next retry creates fresh instance
 
       showProgressError("Error al unir videos: " + (err.message || err));
       alert("Error al unir videos: " + (err.message || err));

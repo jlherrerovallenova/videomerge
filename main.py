@@ -255,7 +255,7 @@ def run_merge_job(job_id: str, req: MergeRequest):
             job["result_info"] = result_info
         else:
             job["status"] = "failed"
-            job["error"] = "Error al procesar la unión de videos. Por favor revisa los formatos de entrada."
+            job["error"] = merger.LAST_ERROR or "Error al procesar la unión de videos. Por favor revisa los formatos de entrada."
 
     except Exception as e:
         job["status"] = "failed"
